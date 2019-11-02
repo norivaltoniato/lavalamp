@@ -1,48 +1,60 @@
+
 /**
- * Lavalamp 2.0 
- * http://arduino.cc/forum/index.php/topic,151444.0.html
- * http://www.youtube.com/watch?v=6jfAZXOzzec
+ * Lavalamp 3.0 
  * 
- * 2013 by Mario Keller
+ * 2019 by Norival Toniato
+ * 
+ * Based on Mario Keller's work (http://www.youtube.com/watch?v=6jfAZXOzzec)
+ * 
  * 
  * Hardware: 
- *    - Arduino pro mini 328 5V / 16MHz
- *    - 20 x WS2811 RGB Controller with 2812 RGB LED 
- *    - 2 x 10k potentiometer 
+ *    - NodeMCU (ESP8266)
+ *    - 20 x APA102 RGB LEDs
+ *    - 1 Rotary Encoder
  *    - 5V / 2A Powersupply
- *
+ *    
+ *    NODEMCU PINS
+ *    D1 = APA102 - Data
+ *    D2 = APA102 - Clock
+ *    D5 = Rotary Encoder SW
+ *    D6 = Rotary Encoder DT
+ *    D7 = Rotary Encoder CLK
+ *    
  **/
 
-#define FASTLED_ESP8266_RAW_PIN_ORDER
-#include <FastLED.h>
 
-#define DEBUG         1   // Debug modes: 0-Off, 1-normal, 2-verbose
+ 
+/**** 
+ *  Encoder
+ */  
+#include <MD_REncoder.h>
+#define ENCODER_A   D6
+#define ENCODER_B   D7
+#define ENCODER_SW  D5
+#define ENCODER_UP 1
+#define ENCODER_DOWN 0
 #define ACTION_CLICK 1
 #define ACTION_DOUBLECLICK 2
 #define ACTION_HOLD 3
 #define ACTION_LONGHOLD 4
-#define MODE_MAX 8
-
-//pin 4 is the output pin 
-#define DATA_PIN     D1
-#define CLOCK_PIN   D2
-#define NUM_LEDS    20
-#define LED_TYPE    APA102
-#define COLOR_ORDER GRB
-
-#define BUTTON_PIN D2
-
-#define A1 1
-#define A2 2
-
-#define KNOB_MODE_VALUE 0
-#define KNOB_MODE_BRIGHT 1
+MD_REncoder R = MD_REncoder(ENCODER_A, ENCODER_B);
+#define VALUE_MIN 2
+#define VALUE_MAX 254
+#define BRIGHTNESS_MIN 2
+#define BRIGHTNESS_MAX 254
 
 
-CRGB leds[NUM_LEDS];
-
-int brightness = 200;
-
+int encoderStep=3;
+/**** 
+ *  Init
+ */  
+int encoderPos = 0;
+int encoderPinALast = LOW;
+unsigned long lastMillis = 0;
+int doubleClickLength = 500;
+int debounceLimit = 100;
+unsigned long debounceMilis = 0;
+int pos = 0;
 // Button timing variables
 int debounce = 20; // ms debounce period to prevent flickering when pressing or releasing the button
 int DCgap = 250; // max ms between clicks for a double click event
@@ -61,8 +73,38 @@ boolean ignoreUp = false; // whether to ignore the button release because the cl
 boolean waitForUp = false; // when held, whether to wait for the up event
 boolean holdEventPast = false; // whether or not the hold event happened already
 boolean longHoldEventPast = false;// whether or not the long hold event happened already
-int pos = 0;
+boolean resetEncoderOnEnd = false;
+boolean changeFunction = false;
 
+
+#define FASTLED_ESP8266_RAW_PIN_ORDER
+#include <FastLED.h>
+
+#define DEBUG         1   // Debug modes: 0-Off, 1-normal, 2-verbose
+#define ACTION_CLICK 1
+#define ACTION_DOUBLECLICK 2
+#define ACTION_HOLD 3
+#define ACTION_LONGHOLD 4
+#define MODE_MAX 7
+
+//pin 4 is the output pin 
+#define DATA_PIN     D1
+#define CLOCK_PIN   D2
+#define NUM_LEDS    20
+#define LED_TYPE    APA102
+#define COLOR_ORDER BGR
+
+#define A1 1
+#define A2 2
+
+#define KNOB_MODE_VALUE 0
+#define KNOB_MODE_BRIGHT 1
+#define KNOB_MAX 1
+
+
+CRGB leds[NUM_LEDS];
+
+int brightness = 125;
 
 //some initial values
 int a0,a1 =0;
@@ -76,17 +118,36 @@ int knobMode = 0;
 void setup() {
   setupEnvironment();
   setupLeds();
+  setupEncoder();
   (DEBUG > 0) && Serial.println ( "Setup concluido" );
 }
 
+
+
+void setupEncoder() {
+  R.begin();
+  pinMode(ENCODER_A, INPUT);
+  pinMode(ENCODER_B, INPUT);
+  pinMode(ENCODER_SW, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A), loopEncoder, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_B), loopEncoder, CHANGE);
+//  attachInterrupt(digitalPinToInterrupt(ENCODER_SW), checkButton, FALLING);
+}
 /**
  * just check the current mode and switch to according function
  *
  **/
 void loop(){
+  changeFunction = false;
+//  int action = checkButton();
+//  if (action >= ACTION_HOLD) {
+//    (DEBUG > 0) && Serial.print ( "Action triggered state:" );
+//    (DEBUG > 0) && Serial.println ( action );  
+////    return;
+//    fireHoldAction();
+//  }
 
-  changeMode();
-  value = getVal();
+//  changeMode();
   switch(mode) {
   case 0:
     color();
@@ -109,89 +170,123 @@ void loop(){
   case 6:   
     bubbles(); 
     break;
+//  case 7:
+//    lotery();     
+//    break;    
   case 7:
-    lotery();     
-    break;    
-  case 8:
     white();     
     break;    
   }
 
 }
 
+void loopEncoder() {
+  uint8_t x = R.read();
+  if ((x == DIR_CW) || (x == DIR_CCW)) {
+    bool isCW = (x == DIR_CW);
+    if (isCW) {
+      (DEBUG > 1) && Serial.println ( "CW" );
+      if (knobMode==KNOB_MODE_VALUE) {
+        value+=encoderStep;
+      } else if (knobMode==KNOB_MODE_BRIGHT) {
+        brightness+=encoderStep;
+      }
+    } else {
+      (DEBUG > 1) && Serial.println ( "CCW" );
+      if (knobMode==KNOB_MODE_VALUE) {
+        value-=encoderStep;
+      } else if (knobMode==KNOB_MODE_BRIGHT) {
+        brightness-=encoderStep;
+      }
+    }
+
+    if (knobMode==KNOB_MODE_VALUE) {
+      if (resetEncoderOnEnd) {
+        if (value > VALUE_MAX) {
+          value = VALUE_MIN;
+        } else if (value < VALUE_MIN) {
+          value = VALUE_MAX;
+        }
+      } else {
+        if (value > VALUE_MAX) {
+          value = VALUE_MAX;
+        } else if (value < VALUE_MIN) {
+          value = VALUE_MIN;
+        }
+      }
+      (DEBUG > 0) && Serial.print ( "Value: " );
+      (DEBUG > 0) && Serial.println ( value );
+    } else if (knobMode==KNOB_MODE_BRIGHT) {
+      if (brightness > BRIGHTNESS_MAX) {
+        brightness = BRIGHTNESS_MAX;
+      } else if (brightness < BRIGHTNESS_MIN) {
+        brightness = BRIGHTNESS_MIN;
+      }
+      FastLED.setBrightness( brightness );
+      FastLED.show();
+      (DEBUG > 0) && Serial.print ( "Brightness: " );
+      (DEBUG > 0) && Serial.println ( brightness );
+    }
+  }
+}
+
+void fireClick() {
+  mode++;
+  if (mode>MODE_MAX) mode=0;
+  changeFunction=true;
+  (DEBUG > 0) && Serial.print ( "Click: " );
+  (DEBUG > 0) && Serial.println ( mode );
+}
+
+void fireDoubleClick() {
+  knobMode++; 
+  if (knobMode>KNOB_MAX) {
+    knobMode = 0;
+  } 
+  if (knobMode==KNOB_MODE_VALUE) {
+    (DEBUG > 1) && Serial.print ( "[2] Value mode" );
+  } else if (knobMode==KNOB_MODE_BRIGHT) {
+    (DEBUG > 1) && Serial.print ( "[2] Brightness mode " );
+  }  
+}
+
+void fireHold() {
+  (DEBUG > 1) && Serial.print ( "[2] Brightness mode " );
+  encoderStep++; 
+  if (encoderStep>3) {
+    encoderStep = 1;
+  } 
+  FastLED.setBrightness(50);
+  for(int i = 0; i < encoderStep; i++ ){
+    for(int j = 0; j < NUM_LEDS; j++ ){
+      leds[j] = CRGB::Black;
+    }
+    FastLED.show();
+    delay(200);
+    for(int j = 0; j < NUM_LEDS; j++ ){
+      leds[j] = CRGB::White;
+    }
+    FastLED.show();
+    delay(100);
+  }
+  FastLED.setBrightness(brightness);
+  FastLED.show();
+}
+
 
 void setupEnvironment() {
-  pinMode(BUTTON_PIN, INPUT);
+//  pinMode(ENCODER_SW, INPUT);
   pinMode(DATA_PIN, OUTPUT);
   Serial.begin (9600);
   delay( 1000 ); // power-up safety delay
-  (DEBUG > 1) && Serial.println ( DATA_PIN );
 }
 
 void setupLeds() {
   (DEBUG > 1) && Serial.println ( "SetupLeds" );
   FastLED.addLeds<LED_TYPE, DATA_PIN, CLOCK_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
+  FastLED.setBrightness(brightness);
+  FastLED.show();
 }
-
-bool changeMode() {
-  (DEBUG > 1) && Serial.println ( mode );
-  int buttonState = checkButton();
-  (DEBUG > 1) && Serial.println ( buttonState );
-  bool result = false;
-  if (buttonState == ACTION_CLICK) {
-    mode++;
-    if (mode==MODE_MAX+1) mode=0;
-    result = true;
-    (DEBUG > 1) && Serial.println ( "CLICK" );
-  } else if (buttonState == ACTION_DOUBLECLICK) {
-    if (knobMode == KNOB_MODE_BRIGHT) {
-      knobMode = KNOB_MODE_VALUE;
-    } else {
-      knobMode = KNOB_MODE_BRIGHT;
-    }
-    (DEBUG > 1) && Serial.println ( "DOUBLE_CLICK" );
-  }
-  
-  return result;
-}
-
-/**
- * read the second knob on A1 to get the current value for
- * some modes (speed, color, brightness)
- **/
-int getVal() {
-//  if (knobMode == KNOB_MODE_VALUE) {
-//    a1 = readAnalog(a1,A0);
-//  
-//    //my potentiometers provide values from 1023 to 0 instead of 0 to 1023
-//    //so I have to swap the mapping
-//    int x =  map(a1,996,20,0,255);
-//  
-//    //eliminate jumping values to prevent flickering colors or brightness
-//    if(abs(oldvalue - x) > 1 ) {
-//      oldvalue = x;     
-//    }
-//    value = x;
-//  }
-  return value;  
-}
-
-void setBright() {
-  if (knobMode == KNOB_MODE_BRIGHT) {
-    int a1 = readAnalog(a1,A0);
-  
-    //my potentiometers provide values from 1023 to 0 instead of 0 to 1023
-    //so I have to swap the mapping
-    int x =  map(a1,20,128,2,255);
-  
-    //eliminate jumping values to prevent flickering colors or brightness
-    if(abs(oldbright - x) > 1 ) {
-      oldbright = x;     
-    }
-    FastLED.setBrightness( x );
-  }
-}
-
 
 /**
  * make analogRead() produce "smoothed" values by having the
@@ -223,14 +318,9 @@ void lotery() {
   }
   
   //run infinite until mode changes
-  while(1) {
-    
+  while(!changeFunction) {
     //gat current value of second knob for brightness
-    value = getVal();
     if (value==255) {
-    
-    
-    
       //only reset LEDs if value has changed
       if(value != oldvalue) {
         for(int j = 0; j < NUM_LEDS; j++ ){
@@ -248,9 +338,6 @@ void lotery() {
         }
         delay(30);
     }
-    if( changeMode() ) break;
-    yield();
-
   }
 }
 
@@ -258,28 +345,26 @@ void lotery() {
  * set all LEDs to "white" (same value for all colors)
  **/
 void white() {
+  (DEBUG > 1) && Serial.println ( "WHITE" );
   int oldvalue = -1;
   FastLED.setTemperature( Candle ); // first temperature
+  int myValue;
 
   
   //run infinite until mode changes
-  while(1) {
-    
-    //gat current value of second knob for brightness
-    value = getVal();
-    value =  map(value,0,255,255,2);
-    
-    
+  for(int j = 0; j < NUM_LEDS; j++ ){
+    leds[j] = CRGB::White;  
+  }
+  FastLED.show();
+  while(!changeFunction) {
     //only reset LEDs if value has changed
     if(value != oldvalue) {
-      for(int j = 0; j < NUM_LEDS; j++ ){
-        setRGB(value,value,value,j);
-      }
+      FastLED.setBrightness( value );
       FastLED.show();
+      brightness = value;
     }
-    if( changeMode() ) break;
-    yield();
-
+    myDelay(value);
+    (DEBUG > 1) && Serial.println ( "Debug" );
   }
 }
 
@@ -287,19 +372,19 @@ void white() {
  * set all LEDs to the same color
  **/
 void color() {
-  while(1) {
-    value = getVal();
-    value =  map(value,0,255,0,255);
-    setBright();
+  (DEBUG > 1) && Serial.println ( "COLOR" );
+  resetEncoderOnEnd = true;
+  while(!changeFunction) {
     for(int j = 0; j < NUM_LEDS; j++ ){
-      setHue2(value,j); 
+      setHue2(revertValue(),j); 
     }
-
     FastLED.show();
-    if( changeMode()) break;
-    yield();
-
+    myDelay(value);
   }
+}
+
+int revertValue() {
+  return map(value,0,255,255,2);   
 }
 
 /**
@@ -309,21 +394,47 @@ void color() {
  **/
 void rainbow()
 { 
-  while(1) {
+  (DEBUG > 1) && Serial.println ( "RAINBOW" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
     for(int i = 0; i < 255; i++)
     {
       for(int j=0;j< NUM_LEDS; j++)
         setHue2(i,j);
       FastLED.show();
-      setBright();
-      delay(getVal());
-      if( changeMode() ) return;
+      myDelay(revertValue());
+//      delay(revertValue());
+//      if( changeFunction ) return;
     }
-
-    if( changeMode() ) return;
   }
 }
 
+bool myDelay(int delayLength) {
+  unsigned long targetMilis;
+  targetMilis = millis() + delayLength;
+  int event;
+  while (targetMilis > millis()) {
+    event = checkButton();
+    if (event!=0) {
+      switch (event) {
+      case 1: 
+        fireClick();
+        break;
+      case 2: 
+        fireDoubleClick();
+        break;
+      case 3: 
+        fireHold();
+        break;
+      case 4:
+        fireHold();
+        break;
+      }
+    }
+    yield();
+  } 
+  return false;
+}
 
 /**
  * run through the color-circle (HUE value) 
@@ -332,9 +443,10 @@ void rainbow()
  *
  **/
 void rainbow2(){
-  while(1) {
-    for(int i = 255; i >= 0; i--)
-    {
+  (DEBUG > 1) && Serial.println ( "RAINBOW2" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for(int i = 255; i >= 0; i--) {
       for (int col = 0; col < 4; col++) {
         for(int row = 0; row < 5; row++) {
           int v = ((10*row) + i) % 255;
@@ -343,12 +455,9 @@ void rainbow2(){
       }
 
       FastLED.show();
-      setBright();
-      delay(getVal()/3);
-      if( changeMode() ) return;
+      myDelay(revertValue()/3);
+      if( changeFunction ) continue;
     }
-
-    if( changeMode() ) return;
   }
 
 }
@@ -361,9 +470,10 @@ void rainbow2(){
  *
  **/
 void rainbow3(){
-  while(1) {
-    for(int i = 255; i >= 0; i--)
-    {
+  (DEBUG > 1) && Serial.println ( "RAINBOW3" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for(int i = 255; i >= 0; i--) {
       int v = i;
       for (int row = 0; row < 5; row++) {
         for(int col = 0; col < 4; col++) {
@@ -373,12 +483,9 @@ void rainbow3(){
       }
 
       FastLED.show();
-      setBright();
-      delay(getVal()/3);
-      if( changeMode() ) return;
+      myDelay(revertValue()/3);
+      if( changeFunction ) continue;
     }
-
-    if( changeMode() ) return;
   }
 
 }
@@ -390,10 +497,11 @@ void rainbow3(){
  *
  **/
 void rainbow4(){
-  while(1) {
+  (DEBUG > 1) && Serial.println ( "RAINBOW4" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
     //counting down creates a clockwise rotation
-    for(int i = 255; i >= 0; i--)
-    {
+    for(int i = 255; i >= 0; i--) {
       for (int row = 0; row < 5; row++) {
         for(int col = 0; col < 4; col++) {
           int v = ((10*col) + i) % 255;
@@ -402,12 +510,9 @@ void rainbow4(){
       }
 
       FastLED.show();
-      setBright();
-      delay(getVal()/3);
-      if( changeMode() ) return;
+      myDelay(revertValue()/3);
+      if( changeFunction ) continue;
     }
-
-    if( changeMode() ) return;
   }
 
 }
@@ -419,10 +524,11 @@ void rainbow4(){
  *
  **/
 void rainbow5(){
-  while(1) {
+  (DEBUG > 1) && Serial.println ( "RAINBOW5" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
     //counting up creates a counter clockwise rotation
-    for(int i = 0; i < 256; i++)
-    {
+    for(int i = 0; i < 256; i++) {
       for (int row = 0; row < 5; row++) {
         for(int col = 0; col < 4; col++) {
           int v = ((10*col) + i) % 255;
@@ -431,15 +537,10 @@ void rainbow5(){
       }
 
       FastLED.show();
-      setBright();
-      delay(getVal()/3);
-      if( changeMode() ) return;
+      myDelay(revertValue()/3);
+      if( changeFunction ) continue;
     }
-
-    if( changeMode() ) return;
-
   }
-
 }
 
 /**
@@ -448,6 +549,8 @@ void rainbow5(){
  * speed is controlled by the value of the second potentiometer
  **/
 void bubbles() {
+  (DEBUG > 1) && Serial.println ( "BUBBLES" );
+  resetEncoderOnEnd = false;
   
   //how many bubbles do we need
   #define NUM_BUBBLES 12
@@ -470,7 +573,7 @@ void bubbles() {
   int stepcounter =0;
 
   //run infinite until mode has changed
-  while(1) {
+  while(!changeFunction) {
     //first check if all bubbles are "active"
     //if not, create a new bubble
     if(numbubbles < NUM_BUBBLES) {
@@ -489,8 +592,9 @@ void bubbles() {
           bubblehue[i]=random(0,256);
           break;
         }
-        if( changeMode() ) return;
+        if( changeFunction ) continue;
       }
+      if( changeFunction ) continue;
     }
     stepcounter++;
     
@@ -499,7 +603,6 @@ void bubbles() {
     for(int i=0;i<NUM_BUBBLES;i++) {
       if(bubblecol[i]!=0) {
         if(stepcounter % bubblespeed[i] == 0) {
-
           bubblerow[i]++;
           //check if bubble has reached upper border and has to be deleted
           if(bubblerow[i] > 4) {
@@ -512,17 +615,12 @@ void bubbles() {
             if(bubblerow[i] > 0) setRGB(0,0,0,(5*(bubblecol[i]-1) + bubblerow[i]-1));
             setHue2(bubblehue[i],(5*(bubblecol[i]-1) + bubblerow[i]));
             FastLED.show();
-
           }
-
         }
       }
-      if( changeMode() ) return;
+      if( changeFunction ) continue;
     }
-    setBright();
-    int x = map(getVal(), 0, 255, 10,255);
-    delay(x);
-    if( changeMode() ) break;
+    myDelay(revertValue());
   }  
 }
 
@@ -600,7 +698,7 @@ void setRGB(int r, int g, int b, int pin) {
 int checkButton() {
   int event = 0;
   // Read the state of the button
-  buttonVal = digitalRead(BUTTON_PIN);
+  buttonVal = digitalRead(ENCODER_SW);
   // Button pressed down
   if (buttonVal == LOW && buttonLast == HIGH && (millis() - upTime) > debounce) {
     downTime = millis();
