@@ -1,4 +1,3 @@
-
 /**
  * Lavalamp 3.0 
  * 
@@ -6,6 +5,8 @@
  * 
  * Based on Mario Keller's work (http://www.youtube.com/watch?v=6jfAZXOzzec)
  * 
+ * Dependencies:
+ *  MD_REncoder
  * 
  * Hardware: 
  *    - NodeMCU (ESP8266)
@@ -85,7 +86,7 @@ boolean changeFunction = false;
 #define ACTION_DOUBLECLICK 2
 #define ACTION_HOLD 3
 #define ACTION_LONGHOLD 4
-#define MODE_MAX 7
+#define MODE_MAX 8
 
 //pin 4 is the output pin 
 #define DATA_PIN     D1
@@ -101,8 +102,8 @@ boolean changeFunction = false;
 #define KNOB_MODE_BRIGHT 1
 #define KNOB_MAX 1
 
-
 CRGB leds[NUM_LEDS];
+
 
 int brightness = 125;
 
@@ -153,27 +154,30 @@ void loop(){
     color();
     break;
   case 1:
-    rainbow();
+    rainbowAll();
     break; 
   case 2:
-    rainbow2();
+    rainbowUp();
     break;
   case 3:
-    rainbow3();
+    rainbowSpiral();
     break;
   case 4:
-    rainbow4();
+    rainbowClockwise();
     break; 
   case 5:
-    rainbow5();
+    rainbowCounterClockwise();
     break;
   case 6:   
     bubbles(); 
     break;
-//  case 7:
-//    lotery();     
-//    break;    
   case 7:
+    randomWhite();     
+    break;    
+  case 8:
+    randomBlink();     
+    break;    
+  case 9:
     white();     
     break;    
   }
@@ -308,105 +312,8 @@ int readAnalog(int prevvalue, int pin) {
 }
 
 
-/**
- * set all LEDs to "white" (same value for all colors)
- **/
-void lotery() {
-  int oldvalue = -1;
-  for(int j = 0; j < NUM_LEDS; j++ ){
-    leds[j] = CRGB::Black;
-  }
-  
-  //run infinite until mode changes
-  while(!changeFunction) {
-    //gat current value of second knob for brightness
-    if (value==255) {
-      //only reset LEDs if value has changed
-      if(value != oldvalue) {
-        for(int j = 0; j < NUM_LEDS; j++ ){
-          setRGB(value,value,value,j);
-        }
-        FastLED.show();
-      }
-    } else {
-        for(int j = 0; j < NUM_LEDS; j++ ){
-          leds[j] = CRGB::White;
-        }
-        delay(30);
-        for(int j = 0; j < NUM_LEDS; j++ ){
-          leds[j] = CRGB::Black;
-        }
-        delay(30);
-    }
-  }
-}
-
-/**
- * set all LEDs to "white" (same value for all colors)
- **/
-void white() {
-  (DEBUG > 1) && Serial.println ( "WHITE" );
-  int oldvalue = -1;
-  FastLED.setTemperature( Candle ); // first temperature
-  int myValue;
-
-  
-  //run infinite until mode changes
-  for(int j = 0; j < NUM_LEDS; j++ ){
-    leds[j] = CRGB::White;  
-  }
-  FastLED.show();
-  while(!changeFunction) {
-    //only reset LEDs if value has changed
-    if(value != oldvalue) {
-      FastLED.setBrightness( value );
-      FastLED.show();
-      brightness = value;
-    }
-    myDelay(value);
-    (DEBUG > 1) && Serial.println ( "Debug" );
-  }
-}
-
-/**
- * set all LEDs to the same color
- **/
-void color() {
-  (DEBUG > 1) && Serial.println ( "COLOR" );
-  resetEncoderOnEnd = true;
-  while(!changeFunction) {
-    for(int j = 0; j < NUM_LEDS; j++ ){
-      setHue2(revertValue(),j); 
-    }
-    FastLED.show();
-    myDelay(value);
-  }
-}
-
 int revertValue() {
   return map(value,0,255,255,2);   
-}
-
-/**
- * run through the color-circle (HUE value) 
- * all LEDs are set to the same color value
- * delay() ist set by the value of the second potentiometer
- **/
-void rainbow()
-{ 
-  (DEBUG > 1) && Serial.println ( "RAINBOW" );
-  resetEncoderOnEnd = false;
-  while(!changeFunction) {
-    for(int i = 0; i < 255; i++)
-    {
-      for(int j=0;j< NUM_LEDS; j++)
-        setHue2(i,j);
-      FastLED.show();
-      myDelay(revertValue());
-//      delay(revertValue());
-//      if( changeFunction ) return;
-    }
-  }
 }
 
 bool myDelay(int delayLength) {
@@ -431,197 +338,68 @@ bool myDelay(int delayLength) {
         break;
       }
     }
-    yield();
+    delay(1);
   } 
   return false;
 }
 
-/**
- * run through the color-circle (HUE value) 
- * every row is set to a new color
- * delay() ist set by the value of the second potentiometer
- *
- **/
-void rainbow2(){
-  (DEBUG > 1) && Serial.println ( "RAINBOW2" );
-  resetEncoderOnEnd = false;
-  while(!changeFunction) {
-    for(int i = 255; i >= 0; i--) {
-      for (int col = 0; col < 4; col++) {
-        for(int row = 0; row < 5; row++) {
-          int v = ((10*row) + i) % 255;
-          setHue2(v,(5*col + row));        
-        } 
-      }
 
-      FastLED.show();
-      myDelay(revertValue()/3);
-      if( changeFunction ) continue;
+int checkButton() {
+  int event = 0;
+  // Read the state of the button
+  buttonVal = digitalRead(ENCODER_SW);
+  // Button pressed down
+  if (buttonVal == LOW && buttonLast == HIGH && (millis() - upTime) > debounce) {
+    downTime = millis();
+    ignoreUp = false;
+    waitForUp = false;
+    singleOK = true;
+    holdEventPast = false;
+    longHoldEventPast = false;
+    if ((millis() - upTime) < DCgap && DConUp == false && DCwaiting == true) DConUp = true;
+    else DConUp = false;
+    DCwaiting = false;
+  }
+  // Button released
+  else if (buttonVal == HIGH && buttonLast == LOW && (millis() - downTime) > debounce) {
+    if (not ignoreUp) {
+      upTime = millis();
+      if (DConUp == false) DCwaiting = true;
+      else {
+        event = 2;
+        DConUp = false;
+        DCwaiting = false;
+        singleOK = false;
+      }
     }
   }
-
-}
-
-/**
- * run through the color-circle (HUE value) 
- * every LED in a row is set to the next color
- * this creates a spiral effect of colors climbing up the lamp
- * delay() ist set by the value of the second potentiometer
- *
- **/
-void rainbow3(){
-  (DEBUG > 1) && Serial.println ( "RAINBOW3" );
-  resetEncoderOnEnd = false;
-  while(!changeFunction) {
-    for(int i = 255; i >= 0; i--) {
-      int v = i;
-      for (int row = 0; row < 5; row++) {
-        for(int col = 0; col < 4; col++) {
-          v = (v + 12) % 255;
-          setHue2(v,(5*col + row));        
-        } 
+  // Test for normal click event: DCgap expired
+  if ( buttonVal == HIGH && (millis() - upTime) >= DCgap && DCwaiting == true && DConUp == false && singleOK == true) {
+    event = 1;
+    DCwaiting = false;
+  }
+  // Test for hold
+  if (buttonVal == LOW && (millis() - downTime) >= holdTime) {
+    // Trigger "normal" hold
+    if (not holdEventPast) {
+      event = 3;
+      waitForUp = true;
+      ignoreUp = true;
+      DConUp = false;
+      DCwaiting = false;
+      //downTime = millis();
+      holdEventPast = true;
+    }
+    // Trigger "long" hold
+    if ((millis() - downTime) >= longHoldTime) {
+      if (not longHoldEventPast) {
+        event = 4;
+        longHoldEventPast = true;
       }
-
-      FastLED.show();
-      myDelay(revertValue()/3);
-      if( changeFunction ) continue;
     }
   }
-
-}
-
-/**
- * run through the color-circle (HUE value) 
- * every column is set to a new color
- * delay() ist set by the value of the second potentiometer
- *
- **/
-void rainbow4(){
-  (DEBUG > 1) && Serial.println ( "RAINBOW4" );
-  resetEncoderOnEnd = false;
-  while(!changeFunction) {
-    //counting down creates a clockwise rotation
-    for(int i = 255; i >= 0; i--) {
-      for (int row = 0; row < 5; row++) {
-        for(int col = 0; col < 4; col++) {
-          int v = ((10*col) + i) % 255;
-          setHue2(v,(5*col + row));        
-        } 
-      }
-
-      FastLED.show();
-      myDelay(revertValue()/3);
-      if( changeFunction ) continue;
-    }
-  }
-
-}
-
-/**
- * run through the color-circle (HUE value) 
- * every column is set to a new color
- * delay() ist set by the value of the second potentiometer
- *
- **/
-void rainbow5(){
-  (DEBUG > 1) && Serial.println ( "RAINBOW5" );
-  resetEncoderOnEnd = false;
-  while(!changeFunction) {
-    //counting up creates a counter clockwise rotation
-    for(int i = 0; i < 256; i++) {
-      for (int row = 0; row < 5; row++) {
-        for(int col = 0; col < 4; col++) {
-          int v = ((10*col) + i) % 255;
-          setHue2(v,(5*col + row));        
-        } 
-      }
-
-      FastLED.show();
-      myDelay(revertValue()/3);
-      if( changeFunction ) continue;
-    }
-  }
-}
-
-/**
- * create a array of "bubbles" in different colors on all columns
- * the climb up the lamp with different speed
- * speed is controlled by the value of the second potentiometer
- **/
-void bubbles() {
-  (DEBUG > 1) && Serial.println ( "BUBBLES" );
-  resetEncoderOnEnd = false;
-  
-  //how many bubbles do we need
-  #define NUM_BUBBLES 12
-
-  //prepare arrays with column, row, color and speed of each bubble
-  byte bubblecol[NUM_BUBBLES];
-  byte bubblerow[NUM_BUBBLES];
-  byte bubblespeed[NUM_BUBBLES];
-  byte bubblehue[NUM_BUBBLES];
-
-  //initialize the bubble-positions
-  byte numbubbles = 0;
-  for(int i=0;i<NUM_BUBBLES;i++) {
-    //columns number of "0" means "inactive" bubble
-    bubblecol[i] = 0;
-    //starting position is "under" the first row
-    bubblerow[i] = -1;
-  }
- 
-  int stepcounter =0;
-
-  //run infinite until mode has changed
-  while(!changeFunction) {
-    //first check if all bubbles are "active"
-    //if not, create a new bubble
-    if(numbubbles < NUM_BUBBLES) {
-      //find fist "incactive bubble"
-      for(int i=0;i<NUM_BUBBLES;i++) {
-        if(bubblecol[i]==0) {
-          //count up number of active bubbles
-          numbubbles++;
-          //set columns of the new bubble
-          bubblecol[i]=random(1,5);
-          //start "under" the first row
-          bubblerow[i] = -1;
-          //set speed
-          bubblespeed[i]=random(1,11);
-          //set color
-          bubblehue[i]=random(0,256);
-          break;
-        }
-        if( changeFunction ) continue;
-      }
-      if( changeFunction ) continue;
-    }
-    stepcounter++;
-    
-    //now run to all "active" bubbles an let them climb up one row
-    //but only if the should, according to their speed
-    for(int i=0;i<NUM_BUBBLES;i++) {
-      if(bubblecol[i]!=0) {
-        if(stepcounter % bubblespeed[i] == 0) {
-          bubblerow[i]++;
-          //check if bubble has reached upper border and has to be deleted
-          if(bubblerow[i] > 4) {
-            bubblecol[i] = 0;
-            bubblerow[i] = 0;
-            numbubbles--;
-            setRGB(0,0,0,(5*(bubblecol[i]-1) + 4));
-          } 
-          else {
-            if(bubblerow[i] > 0) setRGB(0,0,0,(5*(bubblecol[i]-1) + bubblerow[i]-1));
-            setHue2(bubblehue[i],(5*(bubblecol[i]-1) + bubblerow[i]));
-            FastLED.show();
-          }
-        }
-      }
-      if( changeFunction ) continue;
-    }
-    myDelay(revertValue());
-  }  
+  buttonLast = buttonVal;
+  return event;
 }
 
 /**
@@ -695,60 +473,316 @@ void setRGB(int r, int g, int b, int pin) {
 
 }
 
-int checkButton() {
-  int event = 0;
-  // Read the state of the button
-  buttonVal = digitalRead(ENCODER_SW);
-  // Button pressed down
-  if (buttonVal == LOW && buttonLast == HIGH && (millis() - upTime) > debounce) {
-    downTime = millis();
-    ignoreUp = false;
-    waitForUp = false;
-    singleOK = true;
-    holdEventPast = false;
-    longHoldEventPast = false;
-    if ((millis() - upTime) < DCgap && DConUp == false && DCwaiting == true) DConUp = true;
-    else DConUp = false;
-    DCwaiting = false;
+/**
+ * set all LEDs to the same color
+ **/
+void color() {
+  (DEBUG > 0) && Serial.println ( "color()" );
+  resetEncoderOnEnd = true;
+  while(!changeFunction) {
+    for(int j = 0; j < NUM_LEDS; j++ ){
+      setHue2(revertValue(),j); 
+    }
+    FastLED.show();
+    myDelay(value);
+    (DEBUG > 1) && Serial.println ( "color()" );
   }
-  // Button released
-  else if (buttonVal == HIGH && buttonLast == LOW && (millis() - downTime) > debounce) {
-    if (not ignoreUp) {
-      upTime = millis();
-      if (DConUp == false) DCwaiting = true;
-      else {
-        event = 2;
-        DConUp = false;
-        DCwaiting = false;
-        singleOK = false;
+}
+
+/**
+ * run through the color-circle (HUE value) 
+ * all LEDs are set to the same color value
+ * delay() ist set by the value of the second potentiometer
+ **/
+void rainbowAll()
+{ 
+  (DEBUG > 0) && Serial.println ( "rainbowAll()" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for(int i = 0; i < 255; i++) {
+      if( changeFunction ) continue;
+      for(int j=0;j< NUM_LEDS; j++) {
+        if( changeFunction ) continue;
+        setHue2(i,j);
+        }
+      FastLED.show();
+      myDelay(revertValue());
+//      delay(revertValue());
+//      if( changeFunction ) return;
+      (DEBUG > 1) && Serial.println ( "rainbowAll()" );
+    }
+  }
+}
+
+/**
+ * run through the color-circle (HUE value) 
+ * every row is set to a new color
+ * delay() ist set by the value of the second potentiometer
+ *
+ **/
+void rainbowUp(){
+  (DEBUG > 0) && Serial.println ( "rainbowUp()" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for(int i = 255; i >= 0; i--) {
+      if( changeFunction ) continue;
+      for (int col = 0; col < 4; col++) {
+        if( changeFunction ) continue;
+        for(int row = 0; row < 5; row++) {
+          if( changeFunction ) continue;
+          int v = ((10*row) + i) % 255;
+          setHue2(v,(5*col + row));        
+          yield();
+        } 
+        yield();
+      }
+      FastLED.show();
+      myDelay(revertValue()/3);
+      if( changeFunction ) continue;
+      (DEBUG > 1) && Serial.println ( "rainbowUp()" );
+    }
+  }
+}
+
+/**
+ * run through the color-circle (HUE value) 
+ * every LED in a row is set to the next color
+ * this creates a spiral effect of colors climbing up the lamp
+ * delay() ist set by the value of the second potentiometer
+ *
+ **/
+void rainbowSpiral(){
+  (DEBUG > 0) && Serial.println ( "rainbowSpiral()" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for(int i = 255; i >= 0; i--) {
+      if( changeFunction ) continue;
+      int v = i;
+      for (int row = 0; row < 5; row++) {
+        if( changeFunction ) continue;
+        for(int col = 0; col < 4; col++) {
+          if( changeFunction ) continue;
+          v = (v + 12) % 255;
+          setHue2(v,(5*col + row));        
+        } 
+        FastLED.show();
+        myDelay(revertValue()/10);
+        (DEBUG > 1) && Serial.println ( "rainbowSpiral()" );
       }
     }
   }
-  // Test for normal click event: DCgap expired
-  if ( buttonVal == HIGH && (millis() - upTime) >= DCgap && DCwaiting == true && DConUp == false && singleOK == true) {
-    event = 1;
-    DCwaiting = false;
-  }
-  // Test for hold
-  if (buttonVal == LOW && (millis() - downTime) >= holdTime) {
-    // Trigger "normal" hold
-    if (not holdEventPast) {
-      event = 3;
-      waitForUp = true;
-      ignoreUp = true;
-      DConUp = false;
-      DCwaiting = false;
-      //downTime = millis();
-      holdEventPast = true;
+}
+
+/**
+ * run through the color-circle (HUE value) 
+ * every column is set to a new color
+ * delay() ist set by the value of the second potentiometer
+ *
+ **/
+void rainbowClockwise(){
+  (DEBUG > 0) && Serial.println ( "rainbowClockwise()" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    //counting down creates a clockwise rotation
+    for(int i = 255; i >= 0; i--) {
+      if( changeFunction ) continue;
+      for (int row = 0; row < 5; row++) {
+        if( changeFunction ) continue;
+        for(int col = 0; col < 4; col++) {
+          if( changeFunction ) continue;
+          int v = ((10*col) + i) % 255;
+          setHue2(v,(5*col + row));        
+        } 
+      }
+      FastLED.show();
+      myDelay(revertValue()/3);
+      (DEBUG > 1) && Serial.println ( "rainbowClockwise()" );
     }
-    // Trigger "long" hold
-    if ((millis() - downTime) >= longHoldTime) {
-      if (not longHoldEventPast) {
-        event = 4;
-        longHoldEventPast = true;
+  }
+}
+
+/**
+ * run through the color-circle (HUE value) 
+ * every column is set to a new color
+ * delay() ist set by the value of the second potentiometer
+ *
+ **/
+void rainbowCounterClockwise() {
+  (DEBUG > 0) && Serial.println ( "rainbowCounterClockwise()" );
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    //counting up creates a counter clockwise rotation
+    for(int i = 0; i < 256; i++) {
+      if( changeFunction ) continue;
+      for (int row = 0; row < 5; row++) {
+        if( changeFunction ) continue;
+        for(int col = 0; col < 4; col++) {
+          if( changeFunction ) continue;
+          int v = ((10*col) + i) % 255;
+          setHue2(v,(5*col + row));        
+        } 
+      }
+      FastLED.show();
+      myDelay(revertValue()/3);
+      (DEBUG > 1) && Serial.println ( "rainbowCounterClockwise()" );
+    }
+  }
+}
+
+/**
+ * create a array of "bubbles" in different colors on all columns
+ * the climb up the lamp with different speed
+ * speed is controlled by the value of the second potentiometer
+ **/
+void bubbles() {
+  (DEBUG > 0) && Serial.println ( "bubles()" );
+  resetEncoderOnEnd = false;
+  
+  //how many bubbles do we need
+  #define NUM_BUBBLES 12
+
+  //prepare arrays with column, row, color and speed of each bubble
+  byte bubblecol[NUM_BUBBLES];
+  byte bubblerow[NUM_BUBBLES];
+  byte bubblespeed[NUM_BUBBLES];
+  byte bubblehue[NUM_BUBBLES];
+
+  //initialize the bubble-positions
+  byte numbubbles = 0;
+  for(int i=0;i<NUM_BUBBLES;i++) {
+    //columns number of "0" means "inactive" bubble
+    bubblecol[i] = 0;
+    //starting position is "under" the first row
+    bubblerow[i] = -1;
+  }
+ 
+  int stepcounter =0;
+
+  //run infinite until mode has changed
+  while(!changeFunction) {
+    //first check if all bubbles are "active"
+    //if not, create a new bubble
+    if(numbubbles < NUM_BUBBLES) {
+      //find fist "incactive bubble"
+      for(int i=0;i<NUM_BUBBLES;i++) {
+        if( changeFunction ) continue;
+        if(bubblecol[i]==0) {
+          //count up number of active bubbles
+          numbubbles++;
+          //set columns of the new bubble
+          bubblecol[i]=random(1,5);
+          //start "under" the first row
+          bubblerow[i] = -1;
+          //set speed
+          bubblespeed[i]=random(1,11);
+          //set color
+          bubblehue[i]=random(0,256);
+          break;
+        }
       }
     }
+    stepcounter++;
+    
+    //now run to all "active" bubbles an let them climb up one row
+    //but only if the should, according to their speed
+    for(int i=0;i<NUM_BUBBLES;i++) {
+      if( changeFunction ) continue;
+      if(bubblecol[i]!=0) {
+        if(stepcounter % bubblespeed[i] == 0) {
+          bubblerow[i]++;
+          //check if bubble has reached upper border and has to be deleted
+          if(bubblerow[i] > 4) {
+            bubblecol[i] = 0;
+            bubblerow[i] = 0;
+            numbubbles--;
+            setRGB(0,0,0,(5*(bubblecol[i]-1) + 4));
+          } 
+          else {
+            if(bubblerow[i] > 0) setRGB(0,0,0,(5*(bubblecol[i]-1) + bubblerow[i]-1));
+            setHue2(bubblehue[i],(5*(bubblecol[i]-1) + bubblerow[i]));
+            FastLED.show();
+          }
+        }
+      }
+    }
+    myDelay(revertValue());
+    (DEBUG > 1) && Serial.println ( "bubles()" );
+  }  
+}
+
+/**
+ * set all LEDs to "white" (same value for all colors)
+ **/
+void randomWhite() {
+  (DEBUG > 0) && Serial.println ( "randomWhite()" );
+  int starPosition;
+  int starColor;
+  FastLED.setBrightness( 255 );
+  while(!changeFunction) {
+    for(int j = 0; j < NUM_LEDS; j++ ){
+      leds[j] = CRGB::Black;
+    }
+    FastLED.show();
+    starPosition = random(0, 19);
+    starColor = random(255);
+    setRGB(starColor,starColor,starColor,starPosition);
+    FastLED.show();
+    myDelay(revertValue());
+    (DEBUG > 1) && Serial.println ( "randomWhite()" );
   }
-  buttonLast = buttonVal;
-  return event;
+}
+
+/**
+ * set all LEDs to "white" (same value for all colors)
+ **/
+void randomBlink() {
+  (DEBUG > 0) && Serial.println ( "randomBlink()" );
+  int starPosition;
+  int starColor;
+  int r;
+  int g; 
+  int b;
+  FastLED.setBrightness( 255 );
+  while(!changeFunction) {
+    for(int j = 0; j < NUM_LEDS; j++ ){
+      leds[j] = CRGB::Black;
+    }
+    FastLED.show();
+    starPosition = random(0, 19);
+    starColor = random(255);
+    r = random(255);
+    g = random(255);
+    b = random(255);
+    setRGB(b,g,r,starPosition);
+    FastLED.show();
+    myDelay(revertValue());
+    (DEBUG > 0) && Serial.println ( "randomBlink()" );
+  }
+}
+
+/**
+ * set all LEDs to "white" (same value for all colors)
+ **/
+void white() {
+  (DEBUG > 0) && Serial.println ( "white()" );
+  int oldvalue = -1;
+  FastLED.setTemperature( Candle ); // first temperature
+  int myValue;
+
+  
+  //run infinite until mode changes
+  for(int j = 0; j < NUM_LEDS; j++ ){
+    leds[j] = CRGB::White;  
+  }
+  FastLED.show();
+  while(!changeFunction) {
+    //only reset LEDs if value has changed
+    if(value != oldvalue) {
+      FastLED.setBrightness( value );
+      FastLED.show();
+      brightness = value;
+    }
+    myDelay(value);
+    (DEBUG > 1) && Serial.println ( "white()" );
+  }
 }
