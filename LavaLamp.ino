@@ -1,15 +1,20 @@
-//#define DEBUG_MYDELAY
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+#define WIFI_SSID "MilaLamp"
+#define WIFI_PASSWORD "lovemila"
+
+
+// WebServer
+#include <ESP8266WebServer.h>
+ESP8266WebServer server(80);
+#include <uri/UriBraces.h>
+
+#define DEBUG
+//#define DEBUG_C
+// #define DEBUG_MYDELAY
 #define DEBUG_FIRECLICK
 #define DEBUG_CHANGEMODE
 
-// MQTT
-#define MQTT_BRIGHTNESS_STATUS_CHANNEL "/lavalamp/bright/out/"
-#define MQTT_BRIGHTNESS_COMMAND_CHANNEL "/lavalamp/bright/in/"
-#define MQTT_EFFECT_STATUS_CHANNEL "/lavalamp/mode/out/"
-#define MQTT_EFFECT_COMMAND_CHANNEL "/lavalamp/mode/in/"
-#define MQTT_SPEED_STATUS_CHANNEL "/lavalamp/speed/out/"
-#define MQTT_SPEED_COMMAND_CHANNEL "/lavalamp/speed/in/"
-
+#define SERIAL_SPEED 9600
 
 /**
  * Lavalamp 3.0 
@@ -20,6 +25,7 @@
  * 
  * Dependencies:
  *  MD_REncoder
+ *  FastLED
  * 
  * Hardware: 
  *    - NodeMCU (ESP8266)
@@ -54,10 +60,38 @@ MD_REncoder R = MD_REncoder(ENCODER_A, ENCODER_B);
 #define VALUE_MIN 2
 #define VALUE_MAX 254
 #define BRIGHTNESS_MIN 2
-#define BRIGHTNESS_MAX 254
+#define BRIGHTNESS_MAX 250
+#define COLOR_MIN 1
+#define COLOR_MAX 255
+#define ANIMATION_MIN 0
+#define ANIMATION_MAX 9
+#define ANIMATION_WHITE 0
+#define ANIMATION_COLOR_CHANGE_SET 1
+#define ANIMATION_COLOR_CHANGE_AUTO 2
+#define ANIMATION_RAINBOW_WAVE 3
+#define ANIMATION_STROBO 4
+#define ANIMATION_STROBO_COLOR 5
+#define ANIMATION_RAINBOW 6
+#define SPEED_MIN 1
+#define SPEED_MAX 10
+#define SPEED_STEP 24
+#define ANIMATION_START 1
+#define SPEED_START 5
+#define BRIGHTNESS_START 160
 
+
+
+#define MODE_NONE 0
+#define MODE_BRIGHTNESS 1
+#define MODE_COLOR 2
+#define MODE_ANIMATION 3
+#define MODE_SPEED 4
 
 int encoderStep=3;
+void ICACHE_RAM_ATTR loopEncoder();
+
+
+
 /**** 
  *  Init
  */  
@@ -89,20 +123,16 @@ boolean longHoldEventPast = false;// whether or not the long hold event happened
 boolean resetEncoderOnEnd = false;
 boolean changeFunction = false;
 
-
 #define FASTLED_ESP8266_RAW_PIN_ORDER
 #include <FastLED.h>
 
-#define ACTION_CLICK 1
-#define ACTION_DOUBLECLICK 2
-#define ACTION_HOLD 3
-#define ACTION_LONGHOLD 4
-#define MODE_MAX 9
+#define MODE_MIN 0
+#define MODE_MAX 4
 
 //pin 4 is the output pin 
-#define DATA_PIN     D1
+#define DATA_PIN    D1
 #define CLOCK_PIN   D2
-#define NUM_LEDS    20
+#define NUM_LEDS    50
 #define LED_TYPE    APA102
 #define COLOR_ORDER BGR
 
@@ -115,191 +145,225 @@ boolean changeFunction = false;
 
 CRGB leds[NUM_LEDS];
 
-// NETWORK
-const char* ssid = "DeathCorp_2";
-const char* password = "paranoia";
-//const char* ssid = "DeathCorp";
-//const char* password = "MogD%3Xq*oitv";
-#include <ESP8266WiFi.h>
-#include <PubSubClient.h>
-WiFiClient espClient;
+int brightness = BRIGHTNESS_START;
 
-PubSubClient client(espClient);
-const char* mqtt_server = "m10.cloudmqtt.com";
-const char* mqtt_user = "zdxmwjdz";
-const char* mqtt_password = "7HQaKi2oNBdc";
-bool isMQTTEnabled=false;
-
-
-int brightness = 125;
+int ledZero = 0;
 
 //some initial values
 int a0,a1 =0;
 int oldvalue = -1;
 int oldbright = -1;
 
-int value = 30;
+int value = 1;
+int animation = ANIMATION_START;
+int color = COLOR_MIN;
+int speed = SPEED_START;
 int mode = 0;
-int knobMode = 0;
+bool configuration = false;
 
-void setup() {
-  setupEnvironment();
-  setupLeds();
-  setupEncoder();
-  setupWifi();
-  if (isMQTTEnabled ) {
-    setupMQTT();
-  }
-#ifdef DEBUG
-  Serial.println ( "Setup concluido" );
-#endif  
-}
-
-void setupMQTT() {
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(MQTTCallback);
-  reconnectMQTT();
-  client.subscribe("/lavalamp/speed/in/");
-  client.subscribe("/lavalamp/bright/in/");
-  client.subscribe("/lavalamp/mode/in/");
-}
-
-void reconnectMQTT() {
-  // Loop until we're reconnected
-  int i=0;
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a random client ID
-    String clientId = "ESP8266Client";
-    // Attempt to connect
-      Serial.print("ClientID: ");
-      Serial.println(clientId.c_str());
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
+WiFiManager wm;
 
 void setupWifi() {
-  delay(10);
-  // We start by connecting to a WiFi network
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  randomSeed(micros());
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());  
+    WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+//    wm.resetSettings();
+    bool res;
+    res = wm.autoConnect(WIFI_SSID,WIFI_PASSWORD); // password protected ap
+    if(!res) {
+        Serial.println("Failed to connect");
+        delay( 1000 ); // power-up safety delay
+        ESP.restart();
+    }   
 }
 
-void changeMode(int newMode, bool normalize=false) {
-#if defined(DEBUG_V) || defined(DEBUG_CHANGEMODE)
-    Serial.println( "changeMode() IN" );
+
+void setupEnvironment() {
+//  pinMode(ENCODER_SW, INPUT);
+  pinMode(DATA_PIN, OUTPUT);
+  Serial.begin (SERIAL_SPEED);
+  delay( 1000 ); // power-up safety delay
+#ifdef DEBUG
+  Serial.println ( "setupEnvironment concluido" );
 #endif  
-  if (newMode == mode) return;
-  if (normalize) {
-    if (newMode > MODE_MAX) {
-      newMode = 0;
-    }
-    if (newMode < 0) {
-      newMode = MODE_MAX;
-    }
-  }
-  if ((newMode <= MODE_MAX) && (newMode >= 0)) {
-    mode = newMode;
-    changeFunction=true;
-#if defined(DEBUG_V) || defined(DEBUG_CHANGEMODE)
-    Serial.print ( "Mode: " );
-    Serial.println ( mode );
+}
+
+void setBrightness() {
+  FastLED.setBrightness( brightness );
+  FastLED.show();
+#ifdef DEBUG
+  Serial.println( "SHOW-setBrightness()" );
+  Serial.print ( "Brightness: " );
+  Serial.println ( brightness );
 #endif  
-    if (isMQTTEnabled && client.connected()) {
-      publishTopic( MQTT_EFFECT_STATUS_CHANNEL, (char*) mode );
+}
+
+void setupLeds() {
+#ifdef DEBUG_V
+  Serial.println ( "SetupLeds" );
+#endif  
+  FastLED.addLeds<LED_TYPE, DATA_PIN, CLOCK_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
+  setBrightness();
+#ifdef DEBUG
+  Serial.println ( "setupLeds concluido" );
+#endif    
+}
+
+
+void handleAnimation3() {
+  Serial.println ( "handleAnimation3" );
+  animation = constrainWithinLimits(3, ANIMATION_MIN, ANIMATION_MAX, true);
+  changeFunction = true;
+  server.send(200, "text/html", updateWebpage());    
+}
+
+void handleAnimation(int animation) {
+}
+
+void handleModeChange() {
+  changeMode(server.pathArg(0).toInt());
+  server.send(200, "text/html", updateWebpage());    
+}
+
+void handleAnimationChange() {
+  animation = constrainWithinLimits(server.pathArg(0).toInt(), ANIMATION_MIN, ANIMATION_MAX, true);
+  changeFunction = true;
+  server.send(200, "text/html", updateWebpage());    
+}
+
+void handleBrightnessChange() {
+  brightness = constrainWithinLimits(server.pathArg(0).toInt(), BRIGHTNESS_MIN, BRIGHTNESS_MAX, false);
+  setBrightness();
+  server.send(200, "text/html", updateWebpage());    
+}
+
+void handleColorChange() {
+  color = constrainWithinLimits(server.pathArg(0).toInt(), COLOR_MIN, COLOR_MAX, false);
+  changeFunction = true;
+  server.send(200, "text/html", updateWebpage());    
+}
+
+void handleSpeedChange() {
+  int arg = constrainWithinLimits(server.pathArg(0).toInt(), SPEED_MIN, SPEED_MAX, false);
+  speed = map(arg,SPEED_MIN,SPEED_MAX,SPEED_MAX,SPEED_MIN);   
+
+  Serial.print ( "Speed: " );  
+  Serial.println ( speed );  
+  changeFunction = true;
+  server.send(200, "text/html", updateWebpage());    
+}
+
+void setupWebServer() {
+  server.sendHeader("Pragma", "no-cache");
+  server.on("/", handle_OnConnect);
+  server.on(UriBraces("/mode/{}"), handleModeChange);
+  server.on(UriBraces("/animation/{}"), handleAnimationChange);
+  server.on(UriBraces("/brightness/{}"), handleBrightnessChange);
+  server.on(UriBraces("/color/{}"), handleColorChange);
+  server.on(UriBraces("/speed/{}"), handleSpeedChange);
+  server.onNotFound(handle_NotFound);
+  server.begin();
+}
+
+void loopEncoder() {
+  uint8_t x = R.read();
+  if ((x == DIR_CW) || (x == DIR_CCW)) {
+    bool isCW = (x == DIR_CW);
+    if (isCW) {
+#ifdef DEBUG_V
+      Serial.println ( "CW" );
+#endif  
+      updateParameter(1);
+    } else {
+#ifdef DEBUG_V
+      Serial.println ( "CCW" );
+#endif  
+      updateParameter(-1);
+    }
+
+    if (mode==KNOB_MODE_VALUE) {
+      if (resetEncoderOnEnd) {
+        if (value > VALUE_MAX) {
+          value = VALUE_MIN;
+        } else if (value < VALUE_MIN) {
+          value = VALUE_MAX;
+        }
+      } else {
+        if (value > VALUE_MAX) {
+          value = VALUE_MAX;
+        } else if (value < VALUE_MIN) {
+          value = VALUE_MIN;
+        }
+      }
+#ifdef DEBUG
+      Serial.print ( "Value: " );
+      Serial.println ( value );
+#endif  
+    } else if (mode==KNOB_MODE_BRIGHT) {
+      if (brightness > BRIGHTNESS_MAX) {
+        brightness = BRIGHTNESS_MAX;
+      } else if (brightness < BRIGHTNESS_MIN) {
+        brightness = BRIGHTNESS_MIN;
+      }
+      setBrightness();
     }
   }
 }
 
-void MQTTCallback(char* topic, byte* payload, unsigned int length) {
-  String pl = (char*) payload;
-  pl = pl.substring(0, length);
-#ifdef DEBUG
-  Serial.print ( "[MQTT MESSAGE] " );
-  Serial.print ( "Topic: [" );
-  Serial.print ( topic );
-  Serial.print ( "] / Payload: [" );
-  Serial.print ( pl );
-  Serial.println ( "]" );
-#endif  
 
-  if (String(pl.toInt()).equals(pl)) {
-    if ( String(topic).equals("/lavalamp/speed/in/")) {
+void updateParameter(int step) {
+    switch(mode) {
+      case MODE_BRIGHTNESS:
+        brightness = constrainWithinLimits(brightness + (step*encoderStep), BRIGHTNESS_MIN, BRIGHTNESS_MAX, false);
+        setBrightness();
+        break;
+      case MODE_COLOR:
+        color = constrainWithinLimits(color + step, COLOR_MIN, COLOR_MAX, true);
+        changeFunction = true;
 #ifdef DEBUG
-      Serial.println ( "Changing Speed" );    
+      Serial.print ( "Color: " );
+      Serial.println ( color );
 #endif  
-      int s=pl.toInt();
-      if (s<1) {
-        s=1;
-      } else if (s>255) {
-        s=255;
-      }
-      value=s;
-    } else if ( String(topic).equals("/lavalamp/bright/in/")) {
+        break;
+      case MODE_ANIMATION:
+        animation = constrainWithinLimits(animation + step, ANIMATION_MIN, ANIMATION_MAX, true);
+        changeFunction = true;
 #ifdef DEBUG
-      Serial.println ( "Changing Brightness" );
+      Serial.print ( "Animation: " );
+      Serial.println ( animation );
 #endif  
-      int b = pl.toInt();
-      if (b<BRIGHTNESS_MIN) {
-        b = BRIGHTNESS_MIN;
-      } else if (b>BRIGHTNESS_MAX) {
-        b = BRIGHTNESS_MAX;
-      }
-      setBrightness(b);        
-    } else if ( String(topic).equals("/lavalamp/mode/in/")) {
+        break;
+
+      case MODE_SPEED:
+        speed = constrainWithinLimits(speed + step, SPEED_MIN, SPEED_MAX, false);
 #ifdef DEBUG
-      Serial.println ( "Changing mode" );
+      Serial.print ( "Speed: " );
+      Serial.println ( speed );
 #endif  
-      if (String(pl.toInt()).equals(pl)) {
-        changeMode( pl.toInt(), false );
-      }
+        break;
     }
-  }
-//
-//
-//
-//  Serial.print("Message arrived [");
-//  Serial.print(topic);
-//  Serial.print("] ");
-//  for (int i = 0; i < length; i++) {
-//    Serial.print((char)payload[i]);
-//  }
-//  Serial.println();
-//
-//  // Switch on the LED if an 1 was received as first character
-//  if ((char)payload[0] == '1') {
-//    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-//    // but actually the LED is on; this is because
-//    // it is active low on the ESP-01)
-//  } else {
-//    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
-//  }
 
   
 }
+
+
+int constrainWithinLimits(int value, int lowerLimit, int upperLimit, bool cycle) {
+  if (value > upperLimit) {
+    if (cycle) {
+      return lowerLimit;
+    }
+    return upperLimit;
+  }
+
+  if (value < lowerLimit) {
+    if (cycle) {
+      return upperLimit;
+    }
+    return lowerLimit;
+  }
+
+  return value;
+  
+}
+
 
 
 void setupEncoder() {
@@ -310,25 +374,70 @@ void setupEncoder() {
   attachInterrupt(digitalPinToInterrupt(ENCODER_A), loopEncoder, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_B), loopEncoder, CHANGE);
 //  attachInterrupt(digitalPinToInterrupt(ENCODER_SW), checkButton, FALLING);
+#ifdef DEBUG
+  Serial.println ( "setupEncoder concluido" );
+#endif 
 }
-/**
- * just check the current mode and switch to according function
- *
- **/
-void loop(){
-  if (isMQTTEnabled ) {
-    if (!client.connected()) {
-      reconnectMQTT();
-    }
-  }
 
+void setup() {
+  setupEnvironment();
+  setupLeds();
+  setupEncoder();
+  setupWifi();
+  setupWebServer();
+#ifdef DEBUG
+  Serial.println ( "Setup concluido" );
+#endif  
+}
+
+void paintModeLed() {
+  switch(mode) {
+    case MODE_NONE:
+      ledZero = 0;
+      break;
+    case MODE_BRIGHTNESS:
+      leds[0] = CRGB::Red;  
+      break;
+    case MODE_COLOR:
+      leds[0] = CRGB::Blue;  
+      break;
+    case MODE_ANIMATION:
+      leds[0] = CRGB::Yellow;  
+      break;
+    case MODE_SPEED:
+      leds[0] = CRGB::Purple;  
+      break;
+  }
+  FastLED.show();
+#ifdef DEBUG
+  Serial.println( "SHOW-paintModeLed()" );
+#endif  
+  
+}
+
+void changeMode(int newMode) {
+  mode = constrainWithinLimits(newMode, MODE_MIN, MODE_MAX, true);
+  paintModeLed();
+#if defined(DEBUG_V) || defined(DEBUG_CHANGEMODE)
+    Serial.println( "changeMode() IN" );
+#endif  
+    changeFunction=true;
+#if defined(DEBUG_V) || defined(DEBUG_CHANGEMODE)
+    Serial.print ( "Mode: " );
+    Serial.println ( mode );
+#endif  
+}
+
+void annimationLoop() {
+#ifdef DEBUG_V
+    Serial.println ( "annimationLoop()" );
+#endif  
   changeFunction = false;
   char msg[2];
-  snprintf (msg, 2, "%ld", mode);
-//  client.publish("/lavalamp/mode/out", msg);
-  switch(mode) {
+  snprintf (msg, 2, "%ld", animation);
+   switch(animation) {
   case 0:
-    color();
+    animationColor();
     break;
   case 1:
     rainbowAll();
@@ -349,249 +458,149 @@ void loop(){
     bubbles(); 
     break;
   case 7:
-    randomWhite();     
+    animationStrobo();     
     break;    
   case 8:
-    randomBlink();     
+    animationStroboColor();     
     break;    
   case 9:
     white();     
     break;    
   }
-  if (isMQTTEnabled ) {
-    if (!client.connected()) {
-      reconnectMQTT();
-    }
-  }
-  client.loop();
+  // client.loop();
+
 }
 
-void loopEncoder() {
-  uint8_t x = R.read();
-  if ((x == DIR_CW) || (x == DIR_CCW)) {
-    bool isCW = (x == DIR_CW);
-    if (isCW) {
-#ifdef DEBUG_V
-      Serial.println ( "CW" );
-#endif  
-      if (knobMode==KNOB_MODE_VALUE) {
-        value+=encoderStep;
-      } else if (knobMode==KNOB_MODE_BRIGHT) {
-        brightness+=encoderStep;
-      }
-    } else {
-#ifdef DEBUG_V
-      Serial.println ( "CCW" );
-#endif  
-      if (knobMode==KNOB_MODE_VALUE) {
-        value-=encoderStep;
-      } else if (knobMode==KNOB_MODE_BRIGHT) {
-        brightness-=encoderStep;
-      }
-    }
 
-    if (knobMode==KNOB_MODE_VALUE) {
-      if (resetEncoderOnEnd) {
-        if (value > VALUE_MAX) {
-          value = VALUE_MIN;
-        } else if (value < VALUE_MIN) {
-          value = VALUE_MAX;
-        }
-      } else {
-        if (value > VALUE_MAX) {
-          value = VALUE_MAX;
-        } else if (value < VALUE_MIN) {
-          value = VALUE_MIN;
-        }
-      }
-#ifdef DEBUG
-      Serial.print ( "Value: " );
-      Serial.println ( value );
-#endif  
-    } else if (knobMode==KNOB_MODE_BRIGHT) {
-      if (brightness > BRIGHTNESS_MAX) {
-        brightness = BRIGHTNESS_MAX;
-      } else if (brightness < BRIGHTNESS_MIN) {
-        brightness = BRIGHTNESS_MIN;
-      }
-      setBrightness(brightness);
-    }
-  }
+void configutationLoop(){
+  Serial.println( "Enter Configuration" );
+  configuration=false;
+  changeFunction = false;
 }
 
-void setBrightness(int b) {
-  brightness = b;
-  FastLED.setBrightness( brightness );
-  FastLED.show();
-#ifdef DEBUG
-  Serial.print ( "Brightness: " );
-  Serial.println ( brightness );
-#endif  
+/**
+ * just check the current mode and switch to according function
+ *
+ **/
+void loop(){
+//  Serial.println( "LOOP" );
+  server.handleClient();
   
+  if (configuration) {
+    Serial.println( "AHHHHHH" );
+    configutationLoop();
+  } else {
+    annimationLoop();
+  }
 }
+
+
 
 
 void fireClick() {
 #if defined(DEBUG_V) || defined(DEBUG_FIRECLICK)
   Serial.println( "fireClick() IN" );
 #endif  
-  changeMode(mode+1, true);
+  // changeAnimation(animation+1, true);
+  changeMode(mode+1);
 #if defined(DEBUG_V) || defined(DEBUG_FIRECLICK)
   Serial.println( "fireClick() OUT" );
 #endif  
 }
 
-void publishTopic(char* topic, char* payload) {
-  if (isMQTTEnabled ) {
-    client.publish(topic, payload);  
-  }
-#ifdef DEBUG
-  Serial.print ( "[MQTT PUBLISH] " );
-  Serial.print ( "Topic: [" );
-  Serial.print ( topic );
-  Serial.print ( "] / Payload: [" );
-  Serial.print ( payload );
-  Serial.println ( "]" );
-#endif  
-}
-
 void fireDoubleClick() {
-  knobMode++; 
-  if (knobMode>KNOB_MAX) {
-    knobMode = 0;
-  } 
-#ifdef DEBUG_V
-  if (knobMode==KNOB_MODE_VALUE) {
-    Serial.print ( "[2] Value mode" );
-  } else if (knobMode==KNOB_MODE_BRIGHT) {
-    Serial.print ( "[2] Brightness mode " );
-  }  
-#endif  
-  
+//  mode++; 
+//  if (mode>KNOB_MAX) {
+//    mode = 0;
+//  } 
+//#ifdef DEBUG_V
+//  if (mode==KNOB_MODE_VALUE) {
+//    Serial.print ( "[2] Value mode" );
+//  } else if (mode==KNOB_MODE_BRIGHT) {
+//    Serial.print ( "[2] Brightness mode " );
+//  }  
+//#endif  
+//  
 }
 
 void fireHold() {
-#ifdef DEBUG_V
-  Serial.print ( "[2] Brightness mode " );
+  configuration=true;
+  changeFunction = true;
+#if defined(DEBUG)
+  Serial.println( "FireHold" );
 #endif  
-  encoderStep++; 
-  if (encoderStep>3) {
-    encoderStep = 1;
-  } 
-  FastLED.setBrightness(50);
-  for(int i = 0; i < encoderStep; i++ ){
-    for(int j = 0; j < NUM_LEDS; j++ ){
-      leds[j] = CRGB::Black;
-    }
-    FastLED.show();
-    delay(200);
-    for(int j = 0; j < NUM_LEDS; j++ ){
-      leds[j] = CRGB::White;
-    }
-    FastLED.show();
-    delay(100);
-  }
-  setBrightness(brightness);
 }
 
-
-void setupEnvironment() {
-//  pinMode(ENCODER_SW, INPUT);
-  pinMode(DATA_PIN, OUTPUT);
-  Serial.begin (9600);
-  delay( 1000 ); // power-up safety delay
+void fireLongHold() {
+//#ifdef DEBUG_V
+//  Serial.print ( "[2] Brightness mode " );
+//#endif  
+//  encoderStep++; 
+//  if (encoderStep>3) {
+//    encoderStep = 1;
+//  } 
+//  FastLED.setBrightness(50);
+//  for(int i = 0; i < encoderStep; i++ ){
+//    for(int j = 0; j < NUM_LEDS; j++ ){
+//      leds[j] = CRGB::Black;
+//    }
+//    FastLED.show();
+//    delay(200);
+//    for(int j = 0; j < NUM_LEDS; j++ ){
+//      leds[j] = CRGB::White;
+//    }
+//    FastLED.show();
+//    delay(100);
+//  }
+//  setBrightness();
 }
-
-void setupLeds() {
-#ifdef DEBUG_V
-  Serial.println ( "SetupLeds" );
-#endif  
-  FastLED.addLeds<LED_TYPE, DATA_PIN, CLOCK_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
-  setBrightness(brightness);
-}
-
-/**
- * make analogRead() produce "smoothed" values by having the
- * current value only have a small influence on the returned value
- **/
-int readAnalog(int prevvalue, int pin) {
-
-  //what we do here is to use the previous value (7/8) and 
-  //the current value (1/8) to create the new value
-  prevvalue = ( prevvalue *7) +analogRead(pin);
-  prevvalue = prevvalue / 8;
-  
-  //some spacial adjustments for my configuration.
-  //limiting the returned values
-  if(prevvalue < 20 ) prevvalue = 20;
-  if(prevvalue > 996 ) prevvalue = 996;
-
-  return prevvalue;
-}
-
 
 int revertValue() {
-  return map(value,0,255,255,2);   
+  return map(color,0,255,255,2);   
 }
 
-bool myDelay(int delayLength) {
-#if defined(DEBUG_V) || defined(DEBUG_MYDELAY)
-  Serial.println ( "myDelay() IN" );
-#endif  
+
+void myDelay(int delayLength) {
+  server.handleClient();
+  
   unsigned long targetMilis;
   targetMilis = millis() + delayLength;
   int event;
   while (targetMilis > millis()) {
+    server.handleClient();
     event = checkButton();
-#if defined(DEBUG_V) || defined(DEBUG_MYDELAY)
-  Serial.print ( "Event: " );
-  Serial.println ( event );
-#endif  
     if (event!=0) {
       switch (event) {
       case 1: 
-#if defined(DEBUG_V) || defined(DEBUG_MYDELAY)
-  Serial.println ( "fireClick()" );
-#endif  
         fireClick();
         break;
       case 2: 
-#if defined(DEBUG_V) || defined(DEBUG_MYDELAY)
-  Serial.println( "fireDoubleClick()" );
-#endif  
         fireDoubleClick();
         break;
       case 3: 
-#if defined(DEBUG_V) || defined(DEBUG_MYDELAY)
-  Serial.println( "fireHold()" );
-#endif  
         fireHold();
         break;
       case 4:
-#if defined(DEBUG_V) || defined(DEBUG_MYDELAY)
-  Serial.println( "fireHold()" );
-#endif  
-        fireHold();
+        fireLongHold();
         break;
       }
     }
     delay(1);
-//    client.loop();
-#if defined(DEBUG_V) || defined(DEBUG_MYDELAY)
-  Serial.println( "myDelay() OUT" );
-#endif  
   } 
-#ifdef DEBUG_V1
-  Serial.print ( "myDelay - OUT" );
-#endif  
-  return false;
+  targetMilis=0;
 }
+
 
 
 int checkButton() {
   int event = 0;
   // Read the state of the button
   buttonVal = digitalRead(ENCODER_SW);
+#if defined(DEBUG_C)
+  Serial.print( "buttonVal : " );
+  Serial.println( buttonVal );
+#endif  
+
   // Button pressed down
   if (buttonVal == LOW && buttonLast == HIGH && (millis() - upTime) > debounce) {
     downTime = millis();
@@ -643,6 +652,7 @@ int checkButton() {
     }
   }
   buttonLast = buttonVal;
+  
   return event;
 }
 
@@ -720,7 +730,244 @@ void setRGB(int r, int g, int b, int pin) {
 /**
  * set all LEDs to the same color
  **/
-void color() {
+void animationColorChangeSet() {
+#ifdef DEBUG
+  Serial.println ( "animationColor()" );
+#endif  
+    for(int j = ledZero; j < NUM_LEDS; j++ ){
+      setHue2(color,j); 
+    }
+    FastLED.show();
+#ifdef DEBUG
+  Serial.println( "SHOW-animationColor()" );
+#endif  
+    myDelay(value);
+  while(!changeFunction) {
+    //only reset LEDs if value has changed
+    myDelay(value);
+#ifdef DEBUG_V
+    Serial.println ( "animationColor()" );
+#endif  
+  }
+}
+
+/**
+ * set all LEDs to "white" (same value for all colors)
+ **/
+void animationWhite() {
+#ifdef DEBUG
+  Serial.println ( "animationWhite()" );
+#endif  
+  int oldvalue = -1;
+  FastLED.setTemperature( CoolWhiteFluorescent ); // first temperature
+  int myValue;
+  //run infinite until Animation changes
+  for(int j = ledZero; j < NUM_LEDS; j++ ){
+    leds[j] = CRGB::White;  
+  }
+  FastLED.show();
+#ifdef DEBUG
+  Serial.println( "SHOW-animationWhite()" );
+#endif  
+  while(!changeFunction) {
+    //only reset LEDs if value has changed
+    myDelay(value);
+#ifdef DEBUG_V
+    Serial.println ( "animationWhite()" );
+#endif  
+  }
+}
+
+
+
+
+// /**
+//  * run through the color-circle (HUE value) 
+//  * all LEDs are set to the same color value
+//  * delay() ist set by the value of the second potentiometer
+//  **/
+// void rainbowAll()
+// { 
+// #ifdef DEBUG
+//   Serial.println ( "rainbowAll()" );
+// #endif  
+//   resetEncoderOnEnd = false;
+//   while(!changeFunction) {
+//       myDelay(revertValue());
+// #ifdef DEBUG_V
+//       Serial.println ( "rainbowAll()" );
+// #endif  
+//   }
+// }
+
+/**
+ * run through the color-circle (HUE value) 
+ * every row is set to a new color
+ * delay() ist set by the value of the second potentiometer
+ *
+ **/
+void animationColorChangeAuto(){
+#ifdef DEBUG
+  Serial.println ( "rainbowUp()" );
+#endif  
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for (int j = 0; j < 255; j++) {
+      if (changeFunction) { continue; }
+      for (int i = ledZero; i < NUM_LEDS; i++) {
+        if (changeFunction) { continue; }
+        setHue2(j,i);        
+//        yield();
+      }
+      FastLED.show();
+#ifdef DEBUG
+  Serial.println( "SHOW-animationRainbow()" );
+#endif  
+      myDelay(25*speed);
+    }
+    myDelay(revertValue()/3);
+    if( changeFunction ) continue;
+#ifdef DEBUG_V
+      Serial.println ( "rainbowUp()" );
+#endif  
+  }
+}
+
+int invertSpeed(int value) {
+  return map(value, SPEED_MIN, SPEED_MAX, SPEED_MAX, SPEED_MIN);
+}
+
+
+int roundLimit(int value) {
+  if (value >= 255) {
+    value = roundLimit(value-255);
+  }
+  return value;
+}
+
+
+/**
+ * run through the color-circle (HUE value) 
+ * every row is set to a new color
+ * delay() ist set by the value of the second potentiometer
+ *
+ **/
+void animationRainbow(){
+#ifdef DEBUG
+  Serial.println ( "animationRainbowWave()" );
+#endif  
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for (int j = 0; j < 255; j++) {
+      if (changeFunction) continue;
+      for (int i = ledZero; i < NUM_LEDS; i++) {
+        if (changeFunction) {continue;}
+        setHue2(roundLimit(j+(i*5)),i);        
+      }
+      FastLED.show();
+#ifdef DEBUG
+  Serial.println( "SHOW-animationRainbowWave()" );
+#endif  
+      myDelay(SPEED_MAX-speed);
+    }
+//    myDelay(revertValue()/3);
+    if( changeFunction ) continue;
+#ifdef DEBUG_V
+      Serial.println ( "rainbowUp()" );
+#endif  
+  }
+}
+
+/**
+ * run through the color-circle (HUE value) 
+ * every row is set to a new color
+ * delay() ist set by the value of the second potentiometer
+ *
+ **/
+void animationRainbowWave(){
+#ifdef DEBUG
+  Serial.println ( "animationRainbowWave()" );
+#endif  
+  resetEncoderOnEnd = false;
+  while(!changeFunction) {
+    for (int j = 0; j < 255; j++) {
+      if (changeFunction) {continue;}
+      for (int i = ledZero; i < NUM_LEDS; i++) {
+      if (changeFunction) {continue;}
+        int v = (i * j) % 255;
+        setHue2(v,i);        
+//          yield();
+      }
+      FastLED.show();
+#ifdef DEBUG
+  Serial.println( "SHOW-animationRainbowWave()" );
+#endif  
+      myDelay(10+speed);
+    }
+    
+    myDelay(revertValue()/3);
+    if( changeFunction ) continue;
+#ifdef DEBUG_V
+      Serial.println ( "rainbowUp()" );
+#endif  
+  }
+}
+
+void handle_OnConnect() {
+  server.send(200, "text/html", updateWebpage());   
+}
+
+void handle_NotFound(){
+  server.send(404, "text/plain", "Not found");
+}
+
+String updateWebpage(){
+  String ptr = "<!DOCTYPE html> <html>\n";
+  ptr +="<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
+  ptr +="<title>LED Control</title>\n";
+  ptr +="<style>html {font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
+  ptr +="body{margin-top: 50px;} h1 {color: #444444;margin: 50px auto 30px;} h3 {color: #444444;margin-bottom: 50px;}\n";
+  ptr +=".button {display: block;width: 80px;background-color: #1abc9c;border: none;color: white;padding: 13px 30px;text-decoration: none;font-size: 25px;margin: 0px auto 35px;cursor: pointer;border-radius: 4px;}\n";
+  ptr +=".button-on {background-color: #3498db;}\n";
+  ptr +=".button-on:active {background-color: #3498db;}\n";
+  ptr +=".button-off {background-color: #34495e;}\n";
+  ptr +=".button-off:active {background-color: #2c3e50;}\n";
+  ptr +="p {font-size: 14px;color: #888;margin-bottom: 10px;}\n";
+  ptr +="</style>\n";
+  ptr +="</head>\n";
+  ptr +="<body>\n";
+  ptr +="<h1>Lampada da Mila</h1>\n";
+  char buffer[40];
+  sprintf(buffer, "<h3>Mode: %i</h3>\n", mode);
+  ptr += buffer;
+  ptr +="<p><a href='/mode/0'>0 - Default</a><p>\n";
+  ptr +="<p><a href='/mode/1'>1 - Brightness</a><p>\n";
+  ptr +="<p><a href='/mode/2'>2 - Color</a><p>\n";
+  ptr +="<p><a href='/mode/3'>3 - Animation</a><p>\n";
+  ptr +="<p><a href='/mode/4'>4 - Speed</a><p>\n";
+  sprintf(buffer, "<h3>Animation: %i</h3>\n", animation);
+  ptr += buffer;
+  ptr +="<p><a href='/animation/0'>0 - Color</a></p>\n";
+  ptr +="<p><a href='/animation/1'>1 - Rainbow All</a></p>\n";
+  ptr +="<p><a href='/animation/2'>2 - HRainbou Up</a></p>\n";
+  ptr +="<p><a href='/animation/3'>3 - Spiral Rainbow</a></p>\n";
+  ptr +="<p><a href='/animation/4'>4 - VRainbow Clockwise</a></p>\n";
+  ptr +="<p><a href='/animation/5'>5 - VRainbow CounterClockwise</a></p>\n";
+  ptr +="<p><a href='/animation/6'>6 - Lava</a></p>\n";
+  ptr +="<p><a href='/animation/7'>7 - Strobo</a></p>\n";
+  ptr +="<p><a href='/animation/8'>8 - Strobo Color</a></p>\n";
+  ptr +="<p><a href='/animation/9'>9 - White</a></p>\n";
+
+  ptr +="</body>\n";
+  ptr +="</html>\n";
+  return ptr;
+}
+
+
+/**
+ * set all LEDs to the same color
+ **/
+void animationColor() {
 #ifdef DEBUG
   Serial.println ( "color()" );
 #endif  
@@ -730,7 +977,7 @@ void color() {
       setHue2(revertValue(),j); 
     }
     FastLED.show();
-    myDelay(value);
+    myDelay(speed);
 #ifdef DEBUG_V
     Serial.println ( "color()" );
 #endif  
@@ -756,7 +1003,7 @@ void rainbowAll()
         setHue2(i,j);
         }
       FastLED.show();
-      myDelay(revertValue());
+      myDelay(speed);
 #ifdef DEBUG_V
       Serial.println ( "rainbowAll()" );
 #endif  
@@ -789,7 +1036,8 @@ void rainbowUp(){
         yield();
       }
       FastLED.show();
-      myDelay(revertValue()/3);
+      myDelay(speed*10);
+      // myDelay(revertValue()/3);
       if( changeFunction ) continue;
 #ifdef DEBUG_V
       Serial.println ( "rainbowUp()" );
@@ -822,7 +1070,8 @@ void rainbowSpiral(){
           setHue2(v,(5*col + row));        
         } 
         FastLED.show();
-        myDelay(revertValue()/10);
+        myDelay(speed);
+        // myDelay(revertValue()/10);
 #ifdef DEBUG_V
         Serial.println ( "rainbowSpiral()" );
 #endif  
@@ -855,7 +1104,8 @@ void rainbowClockwise(){
         } 
       }
       FastLED.show();
-      myDelay(revertValue()/3);
+      myDelay(speed*10);
+      // myDelay(revertValue()/3);
 #ifdef DEBUG_V
       Serial.println ( "rainbowClockwise()" );
 #endif  
@@ -887,7 +1137,8 @@ void rainbowCounterClockwise() {
         } 
       }
       FastLED.show();
-      myDelay(revertValue()/3);
+      myDelay(speed*10);
+      // myDelay(revertValue()/3);
 #ifdef DEBUG_V
       Serial.println ( "rainbowCounterClockwise()" );
 #endif  
@@ -973,7 +1224,7 @@ void bubbles() {
         }
       }
     }
-    myDelay(revertValue());
+    myDelay(speed*50);
 #ifdef DEBUG_V
     Serial.println ( "bubles()" );
 #endif  
@@ -983,65 +1234,8 @@ void bubbles() {
 /**
  * set all LEDs to "white" (same value for all colors)
  **/
-void randomWhite() {
-#ifdef DEBUG
-  Serial.println ( "randomWhite()" );
-#endif  
-  int starPosition;
-  int starColor;
-  setBrightness( BRIGHTNESS_MAX );
-  while(!changeFunction) {
-    for(int j = 0; j < NUM_LEDS; j++ ){
-      leds[j] = CRGB::Black;
-    }
-    FastLED.show();
-    starPosition = random(0, 19);
-    starColor = random(255);
-    setRGB(starColor,starColor,starColor,starPosition);
-    FastLED.show();
-    myDelay(revertValue());
-#ifdef DEBUG_V
-    Serial.println ( "randomWhite()" );
-#endif  
-  }
-}
-
-/**
- * set all LEDs to "white" (same value for all colors)
- **/
-void randomBlink() {
-#ifdef DEBUG
-  Serial.println ( "randomBlink()" );
-#endif  
-  int starPosition;
-  int starColor;
-  int r;
-  int g; 
-  int b;
-  setBrightness( BRIGHTNESS_MAX );
-  while(!changeFunction) {
-    for(int j = 0; j < NUM_LEDS; j++ ){
-      leds[j] = CRGB::Black;
-    }
-    FastLED.show();
-    starPosition = random(0, 19);
-    starColor = random(255);
-    r = random(255);
-    g = random(255);
-    b = random(255);
-    setRGB(b,g,r,starPosition);
-    FastLED.show();
-    myDelay(revertValue());
-#ifdef DEBUG_V
-    Serial.println ( "randomBlink()" );
-#endif  
-  }
-}
-
-/**
- * set all LEDs to "white" (same value for all colors)
- **/
 void white() {
+  // brightness = BRIGHTNESS_START
 #ifdef DEBUG
   Serial.println ( "white()" );
 #endif  
@@ -1057,13 +1251,69 @@ void white() {
   FastLED.show();
   while(!changeFunction) {
     //only reset LEDs if value has changed
-    if(value != oldvalue) {
-      setBrightness( value );
-      brightness = value;
-    }
-    myDelay(value);
+    myDelay(1000);
 #ifdef DEBUG_V
     Serial.println ( "white()" );
 #endif  
   }
 }
+
+
+/**
+ * set all LEDs to "white" (same value for all colors)
+ **/
+void animationStrobo() {
+#ifdef DEBUG
+  Serial.println ( "randomWhite()" );
+#endif  
+  int initialBrigtness;
+  initialBrigtness = brightness;
+  brightness = BRIGHTNESS_MAX;
+  setBrightness( );
+  while(!changeFunction) {
+    for(int j = ledZero; j < NUM_LEDS; j++ ){
+      leds[j] = CRGB::Black;
+    }
+    FastLED.show();
+    leds[random(ledZero, NUM_LEDS-1)] = CRGB::White;
+    FastLED.show();
+    myDelay(speed*20);
+#ifdef DEBUG_V
+    Serial.println ( "randomWhite()" );
+#endif  
+  }
+  brightness = initialBrigtness;
+  setBrightness( );
+  
+}
+
+/**
+ * set all LEDs to "white" (same value for all colors)
+ **/
+void animationStroboColor() {
+#ifdef DEBUG
+  Serial.println ( "randomWhite()" );
+#endif  
+  int initialBrigtness;
+  initialBrigtness = brightness;
+  brightness = BRIGHTNESS_MAX;
+  setBrightness( );
+  while(!changeFunction) {
+    for(int j = ledZero; j < NUM_LEDS; j++ ){
+      leds[j] = CRGB::Black;
+    }
+    FastLED.show();
+    setHue2(random(COLOR_MIN, COLOR_MAX),random(ledZero, NUM_LEDS-1));    
+    FastLED.show();
+    myDelay(speed*20);
+
+#ifdef DEBUG_V
+    Serial.println ( "randomWhite()" );
+#endif  
+  }
+  brightness = initialBrigtness;
+  setBrightness( );
+  
+}
+
+
