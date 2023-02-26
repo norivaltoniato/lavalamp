@@ -1,6 +1,21 @@
+#include <ArduinoOTA.h>
+
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+// #include <Fonts/FreeSans9pt7b.h>
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
-#define WIFI_SSID "MilaLamp"
-#define WIFI_PASSWORD "lovemila"
+#define WIFI_SSID "LavaLamp"
+#define WIFI_PASSWORD "lavaislove"
 
 
 // WebServer
@@ -49,7 +64,7 @@ ESP8266WebServer server(80);
 #include <MD_REncoder.h>
 #define ENCODER_A   D6
 #define ENCODER_B   D7
-#define ENCODER_SW  D5
+#define ENCODER_SW  D3
 #define ENCODER_UP 1
 #define ENCODER_DOWN 0
 #define ACTION_CLICK 1
@@ -61,24 +76,28 @@ MD_REncoder R = MD_REncoder(ENCODER_A, ENCODER_B);
 #define VALUE_MAX 254
 #define BRIGHTNESS_MIN 2
 #define BRIGHTNESS_MAX 250
-#define COLOR_MIN 1
+#define COLOR_MIN 2
 #define COLOR_MAX 255
 #define ANIMATION_MIN 0
 #define ANIMATION_MAX 9
-#define ANIMATION_WHITE 0
-#define ANIMATION_COLOR_CHANGE_SET 1
-#define ANIMATION_COLOR_CHANGE_AUTO 2
-#define ANIMATION_RAINBOW_WAVE 3
-#define ANIMATION_STROBO 4
-#define ANIMATION_STROBO_COLOR 5
-#define ANIMATION_RAINBOW 6
+
+#define ANIMATION_COLOR 0
+#define ANIMATION_RAINBOW_ALL 1
+#define ANIMATION_RAINBOW_UP 2
+#define ANIMATION_RAINBOW_SPIRAL 3
+#define ANIMATION_RAINBOW_CLOCKWISE 4
+#define ANIMATION_RAINBOW_COUNTERCLOCKWISE 5
+#define ANIMATION_LAVALAMP 6 
+#define ANIMATION_STROBO 7
+#define ANIMATION_STROBO_COLOR 8
+#define ANIMATION_WHITE 9
+
 #define SPEED_MIN 1
 #define SPEED_MAX 10
 #define SPEED_STEP 24
-#define ANIMATION_START 1
+#define ANIMATION_START ANIMATION_RAINBOW_SPIRAL
 #define SPEED_START 5
 #define BRIGHTNESS_START 160
-
 
 
 #define MODE_NONE 0
@@ -95,6 +114,7 @@ void ICACHE_RAM_ATTR loopEncoder();
 /**** 
  *  Init
  */  
+bool isOTASet = false;
 int encoderPos = 0;
 int encoderPinALast = LOW;
 unsigned long lastMillis = 0;
@@ -122,6 +142,10 @@ boolean holdEventPast = false; // whether or not the hold event happened already
 boolean longHoldEventPast = false;// whether or not the long hold event happened already
 boolean resetEncoderOnEnd = false;
 boolean changeFunction = false;
+String displayLine1;
+String displayLine2;
+
+
 
 #define FASTLED_ESP8266_RAW_PIN_ORDER
 #include <FastLED.h>
@@ -130,8 +154,8 @@ boolean changeFunction = false;
 #define MODE_MAX 4
 
 //pin 4 is the output pin 
-#define DATA_PIN    D1
-#define CLOCK_PIN   D2
+#define DATA_PIN    D4
+#define CLOCK_PIN   D5
 #define NUM_LEDS    50
 #define LED_TYPE    APA102
 #define COLOR_ORDER BGR
@@ -147,32 +171,37 @@ CRGB leds[NUM_LEDS];
 
 int brightness = BRIGHTNESS_START;
 
-int ledZero = 0;
-
-//some initial values
-int a0,a1 =0;
-int oldvalue = -1;
-int oldbright = -1;
-
 int value = 1;
 int animation = ANIMATION_START;
 int color = COLOR_MIN;
 int speed = SPEED_START;
 int mode = 0;
 bool configuration = false;
+String animationName[ANIMATION_MAX+1] = { "Color", "Rainbow", "Up", "Spiral", "Clockwise", "Ctr.Clockwise", "Lava", "Strobo", "Color Strobo", "White" };
 
 WiFiManager wm;
 
 void setupWifi() {
     WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
-//    wm.resetSettings();
+#ifdef DEBUG
+  Serial.println ( "setupWifi iniciado" );
+#endif  
     bool res;
     res = wm.autoConnect(WIFI_SSID,WIFI_PASSWORD); // password protected ap
+
     if(!res) {
         Serial.println("Failed to connect");
         delay( 1000 ); // power-up safety delay
         ESP.restart();
     }   
+    IPAddress ip;
+    ip = WiFi.localIP();
+    displayLine1 = "IP:" +String(ip[0])+'.'+String(ip[1])+'.'+String(ip[2])+'.'+String(ip[3]);
+    displayWrite();
+
+#ifdef DEBUG
+  Serial.println ( "setupWifi concluido" );
+#endif  
 }
 
 
@@ -208,14 +237,11 @@ void setupLeds() {
 }
 
 
-void handleAnimation3() {
-  Serial.println ( "handleAnimation3" );
-  animation = constrainWithinLimits(3, ANIMATION_MIN, ANIMATION_MAX, true);
+void changeAnimation(int an=animation+1) {
+  Serial.println ( "changeAnimation" );
+  animation = constrainWithinLimits(an, ANIMATION_MIN, ANIMATION_MAX, true);
   changeFunction = true;
-  server.send(200, "text/html", updateWebpage());    
-}
-
-void handleAnimation(int animation) {
+  displayWrite();
 }
 
 void handleModeChange() {
@@ -224,8 +250,7 @@ void handleModeChange() {
 }
 
 void handleAnimationChange() {
-  animation = constrainWithinLimits(server.pathArg(0).toInt(), ANIMATION_MIN, ANIMATION_MAX, true);
-  changeFunction = true;
+  changeAnimation(server.pathArg(0).toInt());
   server.send(200, "text/html", updateWebpage());    
 }
 
@@ -251,6 +276,13 @@ void handleSpeedChange() {
   server.send(200, "text/html", updateWebpage());    
 }
 
+void handleOTA() {
+  displayWriteBig("OTA Update");
+  configuration=true;
+  changeFunction = true;
+  server.send(200, "text/html", updateWebpage());    
+}
+
 void setupWebServer() {
   server.sendHeader("Pragma", "no-cache");
   server.on("/", handle_OnConnect);
@@ -259,6 +291,7 @@ void setupWebServer() {
   server.on(UriBraces("/brightness/{}"), handleBrightnessChange);
   server.on(UriBraces("/color/{}"), handleColorChange);
   server.on(UriBraces("/speed/{}"), handleSpeedChange);
+  server.on(UriBraces("/flash"), handleOTA);
   server.onNotFound(handle_NotFound);
   server.begin();
 }
@@ -379,8 +412,70 @@ void setupEncoder() {
 #endif 
 }
 
+
+void setupOTA() {
+#ifdef DEBUG
+  Serial.println ( "setupOTA iniciado" );
+#endif 
+  ArduinoOTA.setHostname("OTA-Lava");
+  ArduinoOTA.setPassword("admin");
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else {  // U_FS
+      type = "filesystem";
+    }
+
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+    configuration=false;
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  ArduinoOTA.begin();  
+#ifdef DEBUG
+  Serial.println ( "setupOTA concluido" );
+#endif 
+}
+
+
+void setupDisplay() 
+{
+#ifdef DEBUG
+  Serial.println ( "setupDisplay iniciado" );
+#endif   
+  display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
+  display.clearDisplay();
+  // display.setFont(&FreeSans9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+#ifdef DEBUG
+  Serial.println ( "setupDisplay concluido" );
+#endif   
+}
+
+
 void setup() {
   setupEnvironment();
+  setupDisplay();
   setupLeds();
   setupEncoder();
   setupWifi();
@@ -390,34 +485,10 @@ void setup() {
 #endif  
 }
 
-void paintModeLed() {
-  switch(mode) {
-    case MODE_NONE:
-      ledZero = 0;
-      break;
-    case MODE_BRIGHTNESS:
-      leds[0] = CRGB::Red;  
-      break;
-    case MODE_COLOR:
-      leds[0] = CRGB::Blue;  
-      break;
-    case MODE_ANIMATION:
-      leds[0] = CRGB::Yellow;  
-      break;
-    case MODE_SPEED:
-      leds[0] = CRGB::Purple;  
-      break;
-  }
-  FastLED.show();
-#ifdef DEBUG
-  Serial.println( "SHOW-paintModeLed()" );
-#endif  
-  
-}
+
 
 void changeMode(int newMode) {
   mode = constrainWithinLimits(newMode, MODE_MIN, MODE_MAX, true);
-  paintModeLed();
 #if defined(DEBUG_V) || defined(DEBUG_CHANGEMODE)
     Serial.println( "changeMode() IN" );
 #endif  
@@ -435,47 +506,76 @@ void annimationLoop() {
   changeFunction = false;
   char msg[2];
   snprintf (msg, 2, "%ld", animation);
-   switch(animation) {
-  case 0:
-    animationColor();
-    break;
-  case 1:
-    rainbowAll();
-    break; 
-  case 2:
-    rainbowUp();
-    break;
-  case 3:
-    rainbowSpiral();
-    break;
-  case 4:
-    rainbowClockwise();
-    break; 
-  case 5:
-    rainbowCounterClockwise();
-    break;
-  case 6:   
-    bubbles(); 
-    break;
-  case 7:
-    animationStrobo();     
-    break;    
-  case 8:
-    animationStroboColor();     
-    break;    
-  case 9:
-    white();     
-    break;    
+  switch(animation) {
+    case ANIMATION_COLOR:
+        animationColor();
+        break;
+      case ANIMATION_RAINBOW_ALL:
+        rainbowAll();
+        break; 
+      case ANIMATION_RAINBOW_UP:
+        rainbowUp();
+        break;
+      case ANIMATION_RAINBOW_SPIRAL:
+        rainbowSpiral();
+        break;
+      case ANIMATION_RAINBOW_CLOCKWISE:
+        rainbowClockwise();
+        break; 
+      case ANIMATION_RAINBOW_COUNTERCLOCKWISE:
+        rainbowCounterClockwise();
+        break;
+      case ANIMATION_LAVALAMP:   
+        bubbles(); 
+        break;
+      case ANIMATION_STROBO:
+        animationStrobo();     
+        break;    
+      case ANIMATION_STROBO_COLOR:
+        animationStroboColor();     
+        break;    
+      case ANIMATION_WHITE:
+        white();     
+        break;    
   }
   // client.loop();
-
 }
 
 
+
+void displayWrite() 
+{
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.print(displayLine1);
+  display.setCursor(0,16);
+  display.println("Anim:" +animationName[animation]);
+  display.display();
+}
+
+
+void displayWriteBig(String message) 
+{
+  display.setTextSize(2);
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.print(message);
+  display.display();
+}
+
+
+
+
 void configutationLoop(){
-  Serial.println( "Enter Configuration" );
-  configuration=false;
-  changeFunction = false;
+  // Serial.println( "OTA UPDATE" );
+  if (!isOTASet) {
+    isOTASet = true;
+    setupOTA();
+  }
+
+  ArduinoOTA.handle();
+  // configuration=false;
+  // changeFunction = false;
 }
 
 /**
@@ -487,7 +587,6 @@ void loop(){
   server.handleClient();
   
   if (configuration) {
-    Serial.println( "AHHHHHH" );
     configutationLoop();
   } else {
     annimationLoop();
@@ -501,8 +600,8 @@ void fireClick() {
 #if defined(DEBUG_V) || defined(DEBUG_FIRECLICK)
   Serial.println( "fireClick() IN" );
 #endif  
-  // changeAnimation(animation+1, true);
-  changeMode(mode+1);
+  changeAnimation();
+  // changeMode(mode+1);
 #if defined(DEBUG_V) || defined(DEBUG_FIRECLICK)
   Serial.println( "fireClick() OUT" );
 #endif  
@@ -524,35 +623,21 @@ void fireDoubleClick() {
 }
 
 void fireHold() {
-  configuration=true;
-  changeFunction = true;
+  // configuration=true;
+  // changeFunction = true;
 #if defined(DEBUG)
   Serial.println( "FireHold" );
 #endif  
 }
 
 void fireLongHold() {
-//#ifdef DEBUG_V
-//  Serial.print ( "[2] Brightness mode " );
-//#endif  
-//  encoderStep++; 
-//  if (encoderStep>3) {
-//    encoderStep = 1;
-//  } 
-//  FastLED.setBrightness(50);
-//  for(int i = 0; i < encoderStep; i++ ){
-//    for(int j = 0; j < NUM_LEDS; j++ ){
-//      leds[j] = CRGB::Black;
-//    }
-//    FastLED.show();
-//    delay(200);
-//    for(int j = 0; j < NUM_LEDS; j++ ){
-//      leds[j] = CRGB::White;
-//    }
-//    FastLED.show();
-//    delay(100);
-//  }
-//  setBrightness();
+#if defined(DEBUG)
+  Serial.println( "FireLongHold" );
+#endif  
+  displayWriteBig("WiFi Setup");
+  wm.resetSettings();
+  delay(1000);
+  wm.startConfigPortal();
 }
 
 int revertValue() {
@@ -734,7 +819,7 @@ void animationColorChangeSet() {
 #ifdef DEBUG
   Serial.println ( "animationColor()" );
 #endif  
-    for(int j = ledZero; j < NUM_LEDS; j++ ){
+    for(int j = 0; j < NUM_LEDS; j++ ){
       setHue2(color,j); 
     }
     FastLED.show();
@@ -758,11 +843,10 @@ void animationWhite() {
 #ifdef DEBUG
   Serial.println ( "animationWhite()" );
 #endif  
-  int oldvalue = -1;
   FastLED.setTemperature( CoolWhiteFluorescent ); // first temperature
   int myValue;
   //run infinite until Animation changes
-  for(int j = ledZero; j < NUM_LEDS; j++ ){
+  for(int j = 0; j < NUM_LEDS; j++ ){
     leds[j] = CRGB::White;  
   }
   FastLED.show();
@@ -814,7 +898,7 @@ void animationColorChangeAuto(){
   while(!changeFunction) {
     for (int j = 0; j < 255; j++) {
       if (changeFunction) { continue; }
-      for (int i = ledZero; i < NUM_LEDS; i++) {
+      for (int i = 0; i < NUM_LEDS; i++) {
         if (changeFunction) { continue; }
         setHue2(j,i);        
 //        yield();
@@ -860,7 +944,7 @@ void animationRainbow(){
   while(!changeFunction) {
     for (int j = 0; j < 255; j++) {
       if (changeFunction) continue;
-      for (int i = ledZero; i < NUM_LEDS; i++) {
+      for (int i = 0; i < NUM_LEDS; i++) {
         if (changeFunction) {continue;}
         setHue2(roundLimit(j+(i*5)),i);        
       }
@@ -892,7 +976,7 @@ void animationRainbowWave(){
   while(!changeFunction) {
     for (int j = 0; j < 255; j++) {
       if (changeFunction) {continue;}
-      for (int i = ledZero; i < NUM_LEDS; i++) {
+      for (int i = 0; i < NUM_LEDS; i++) {
       if (changeFunction) {continue;}
         int v = (i * j) % 255;
         setHue2(v,i);        
@@ -936,15 +1020,15 @@ String updateWebpage(){
   ptr +="</style>\n";
   ptr +="</head>\n";
   ptr +="<body>\n";
-  ptr +="<h1>Lampada da Mila</h1>\n";
+  ptr +="<h1>LavaLamp</h1>\n";
   char buffer[40];
-  sprintf(buffer, "<h3>Mode: %i</h3>\n", mode);
-  ptr += buffer;
-  ptr +="<p><a href='/mode/0'>0 - Default</a><p>\n";
-  ptr +="<p><a href='/mode/1'>1 - Brightness</a><p>\n";
-  ptr +="<p><a href='/mode/2'>2 - Color</a><p>\n";
-  ptr +="<p><a href='/mode/3'>3 - Animation</a><p>\n";
-  ptr +="<p><a href='/mode/4'>4 - Speed</a><p>\n";
+  // sprintf(buffer, "<h3>Mode: %i</h3>\n", mode);
+  // ptr += buffer;
+  // ptr +="<p><a href='/mode/0'>0 - Default</a><p>\n";
+  // ptr +="<p><a href='/mode/1'>1 - Brightness</a><p>\n";
+  // ptr +="<p><a href='/mode/2'>2 - Color</a><p>\n";
+  // ptr +="<p><a href='/mode/3'>3 - Animation</a><p>\n";
+  // ptr +="<p><a href='/mode/4'>4 - Speed</a><p>\n";
   sprintf(buffer, "<h3>Animation: %i</h3>\n", animation);
   ptr += buffer;
   ptr +="<p><a href='/animation/0'>0 - Color</a></p>\n";
@@ -957,6 +1041,8 @@ String updateWebpage(){
   ptr +="<p><a href='/animation/7'>7 - Strobo</a></p>\n";
   ptr +="<p><a href='/animation/8'>8 - Strobo Color</a></p>\n";
   ptr +="<p><a href='/animation/9'>9 - White</a></p>\n";
+  ptr +="<h3>Updates:</h3>\n";
+  ptr +="<p><a href='/flash'>Firmware Flash</a></p>\n";
 
   ptr +="</body>\n";
   ptr +="</html>\n";
@@ -1239,7 +1325,6 @@ void white() {
 #ifdef DEBUG
   Serial.println ( "white()" );
 #endif  
-  int oldvalue = -1;
   FastLED.setTemperature( Candle ); // first temperature
   int myValue;
 
@@ -1271,11 +1356,11 @@ void animationStrobo() {
   brightness = BRIGHTNESS_MAX;
   setBrightness( );
   while(!changeFunction) {
-    for(int j = ledZero; j < NUM_LEDS; j++ ){
+    for(int j = 0; j < NUM_LEDS; j++ ){
       leds[j] = CRGB::Black;
     }
     FastLED.show();
-    leds[random(ledZero, NUM_LEDS-1)] = CRGB::White;
+    leds[random(0, NUM_LEDS-1)] = CRGB::White;
     FastLED.show();
     myDelay(speed*20);
 #ifdef DEBUG_V
@@ -1299,11 +1384,11 @@ void animationStroboColor() {
   brightness = BRIGHTNESS_MAX;
   setBrightness( );
   while(!changeFunction) {
-    for(int j = ledZero; j < NUM_LEDS; j++ ){
+    for(int j = 0; j < NUM_LEDS; j++ ){
       leds[j] = CRGB::Black;
     }
     FastLED.show();
-    setHue2(random(COLOR_MIN, COLOR_MAX),random(ledZero, NUM_LEDS-1));    
+    setHue2(random(COLOR_MIN, COLOR_MAX),random(0, NUM_LEDS-1));    
     FastLED.show();
     myDelay(speed*20);
 
